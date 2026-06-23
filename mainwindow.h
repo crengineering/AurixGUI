@@ -6,6 +6,7 @@
 
 // Forward declarations: only pointer types needed here, not full headers.
 // Saves compile time; real includes are in the .cpp.
+class QCheckBox;
 class QComboBox;
 class QPushButton;
 class QPlainTextEdit;
@@ -33,6 +34,7 @@ private:
     QPushButton    *m_connectBtn       = nullptr;
     QPushButton    *m_refreshBtn       = nullptr;
     QPushButton    *m_clearBtn         = nullptr;
+    QCheckBox      *m_autoClearChk     = nullptr;
     QPlainTextEdit *m_output           = nullptr;
     QSerialPort    *m_serial           = nullptr;
     QTimer         *m_autoConnectTimer = nullptr;

@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QPushButton>
 #include <QPlainTextEdit>
@@ -25,7 +26,8 @@ MainWindow::MainWindow(QWidget *parent)
     m_baudBox    = new QComboBox;
     m_refreshBtn = new QPushButton("Refresh");
     m_connectBtn = new QPushButton("Connect");
-    m_clearBtn   = new QPushButton("Clear");
+    m_clearBtn     = new QPushButton("Clear");
+    m_autoClearChk = new QCheckBox("Auto Clear");
     m_output     = new QPlainTextEdit;
     m_output->setReadOnly(true);
 
@@ -43,7 +45,12 @@ MainWindow::MainWindow(QWidget *parent)
     topRow->addWidget(m_baudBox);
     topRow->addWidget(m_refreshBtn);
     topRow->addWidget(m_connectBtn);
-    topRow->addWidget(m_clearBtn);
+
+    auto *clearGroup = new QVBoxLayout;
+    clearGroup->setSpacing(2);
+    clearGroup->addWidget(m_clearBtn);
+    clearGroup->addWidget(m_autoClearChk);
+    topRow->addLayout(clearGroup);
 
     auto *layout = new QVBoxLayout;
     layout->addLayout(topRow);
@@ -122,6 +129,11 @@ void MainWindow::readData()
     // readyRead fires as soon as data arrives; it may be a partial packet,
     // so do NOT assume complete lines.
     const QByteArray data = m_serial->readAll();
+
+    // "CPU0 started" is the first UART message after a fresh flash — use it
+    // as a reliable reset marker to clear old output automatically.
+    if (m_autoClearChk->isChecked() && data.contains("CPU0 started"))
+        m_output->clear();
 
     // insertPlainText instead of appendPlainText: append would force a new line
     // on every chunk and break up the data stream.
