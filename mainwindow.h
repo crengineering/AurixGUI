@@ -4,8 +4,8 @@
 #include <QMainWindow>
 #include <QSerialPort>
 
-// Forward-Declarations: wir brauchen hier nur die Zeiger-Typen, nicht die
-// vollen Header. Spart Kompilierzeit. Die echten Includes stehen im .cpp.
+// Forward declarations: only pointer types needed here, not full headers.
+// Saves compile time; real includes are in the .cpp.
 class QComboBox;
 class QPushButton;
 class QPlainTextEdit;
@@ -13,20 +13,20 @@ class QTimer;
 
 class MainWindow : public QMainWindow
 {
-    Q_OBJECT   // Pflicht-Makro fuer alles mit Signals/Slots. Triggert moc.
+    Q_OBJECT   // Required macro for signals/slots. Triggers moc.
 
 public:
     explicit MainWindow(QWidget *parent = nullptr);
 
 private slots:
-    void refreshPorts();                                   // Port-Liste neu einlesen
-    void toggleConnection();                               // Verbinden / Trennen
-    void readData();                                       // Daten vom Port lesen
-    void handleError(QSerialPort::SerialPortError error);  // z.B. Board abgezogen
-    void tryAutoConnect();                                 // Auto-Verbinden / Retry
+    void refreshPorts();                                   // Rescan available ports
+    void toggleConnection();                               // Connect / Disconnect
+    void readData();                                       // Read incoming data
+    void handleError(QSerialPort::SerialPortError error);  // e.g. board unplugged
+    void tryAutoConnect();                                 // Auto-connect / retry
 
 private:
-    void setConnectedState(bool connected);                // UI aktiv/inaktiv schalten
+    void setConnectedState(bool connected);                // Enable/disable UI controls
 
     QComboBox      *m_portBox          = nullptr;
     QComboBox      *m_baudBox          = nullptr;

@@ -17,11 +17,10 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle("AURIX Serial Monitor");
     resize(700, 500);
 
-    // 'this' als Parent: Qt loescht m_serial automatisch mit dem Fenster.
-    // Das ersetzt das, was in Python der Garbage Collector gemacht hat.
+    // 'this' as parent: Qt destroys m_serial automatically with the window.
     m_serial = new QSerialPort(this);
 
-    // ---- Widgets erzeugen ----
+    // ---- Widgets ----
     m_portBox    = new QComboBox;
     m_baudBox    = new QComboBox;
     m_refreshBtn = new QPushButton("Refresh");
@@ -30,7 +29,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_output     = new QPlainTextEdit;
     m_output->setReadOnly(true);
 
-    // Gaengige Baudraten. 115200 ist typisch fuer ASCLIN/UART am AURIX.
+    // Common baud rates. 115200 is typical for ASCLIN/UART on AURIX.
     const QList<qint32> bauds = {9600, 19200, 38400, 57600, 115200, 230400, 921600};
     for (qint32 b : bauds)
         m_baudBox->addItem(QString::number(b), b);
@@ -54,7 +53,7 @@ MainWindow::MainWindow(QWidget *parent)
     central->setLayout(layout);
     setCentralWidget(central);
 
-    // ---- Signals/Slots verbinden ----
+    // ---- Signals/Slots ----
     connect(m_refreshBtn, &QPushButton::clicked,    this, &MainWindow::refreshPorts);
     connect(m_connectBtn, &QPushButton::clicked,    this, &MainWindow::toggleConnection);
     connect(m_clearBtn,   &QPushButton::clicked,    m_output, &QPlainTextEdit::clear);
@@ -73,10 +72,10 @@ void MainWindow::refreshPorts()
 
     const auto ports = QSerialPortInfo::availablePorts();
     for (const QSerialPortInfo &info : ports) {
-        QString label = info.portName();              // z.B. "COM3"
+        QString label = info.portName();              // e.g. "COM3"
         if (!info.description().isEmpty())
-            label += " - " + info.description();      // z.B. "COM3 - USB Serial Port"
-        // Anzeigetext + echter Portname als hinterlegte Daten.
+            label += " - " + info.description();      // e.g. "COM3 - USB Serial Port"
+        // Display text + actual port name stored as item data.
         m_portBox->addItem(label, info.portName());
     }
 
@@ -86,7 +85,7 @@ void MainWindow::refreshPorts()
 
 void MainWindow::toggleConnection()
 {
-    // Ist der Port offen -> trennen.
+    // Port is open -> disconnect.
     if (m_serial->isOpen()) {
         m_autoConnect = false;
         m_autoConnectTimer->stop();
@@ -106,7 +105,7 @@ void MainWindow::toggleConnection()
     m_serial->setStopBits(QSerialPort::OneStop);
     m_serial->setFlowControl(QSerialPort::NoFlowControl);
 
-    // Phase 1: nur lesen. Fuer Phase 2 (Senden) auf QIODevice::ReadWrite aendern.
+    // Phase 1: read-only. Change to QIODevice::ReadWrite for Phase 2 (sending).
     if (m_serial->open(QIODevice::ReadOnly)) {
         setConnectedState(true);
         m_output->appendPlainText(
@@ -120,12 +119,12 @@ void MainWindow::toggleConnection()
 
 void MainWindow::readData()
 {
-    // readyRead feuert, sobald Daten da sind. Es kann ein Teil-Paket sein,
-    // also NICHT von vollstaendigen Zeilen ausgehen.
+    // readyRead fires as soon as data arrives; it may be a partial packet,
+    // so do NOT assume complete lines.
     const QByteArray data = m_serial->readAll();
 
-    // insertPlainText statt appendPlainText: append wuerde bei jedem Chunk
-    // eine neue Zeile erzwingen und den Datenstrom zerhacken.
+    // insertPlainText instead of appendPlainText: append would force a new line
+    // on every chunk and break up the data stream.
     m_output->moveCursor(QTextCursor::End);
     m_output->insertPlainText(QString::fromUtf8(data));
     m_output->moveCursor(QTextCursor::End);
@@ -133,7 +132,7 @@ void MainWindow::readData()
 
 void MainWindow::handleError(QSerialPort::SerialPortError error)
 {
-    // ResourceError = Port verschwunden (z.B. Board abgezogen / Kabel raus).
+    // ResourceError = port disappeared (e.g. board unplugged / cable pulled).
     if (error == QSerialPort::ResourceError) {
         m_output->appendPlainText("[Connection error: " + m_serial->errorString() + "]");
         if (m_serial->isOpen())
@@ -147,7 +146,7 @@ void MainWindow::handleError(QSerialPort::SerialPortError error)
 void MainWindow::setConnectedState(bool connected)
 {
     m_connectBtn->setText(connected ? "Disconnect" : "Connect");
-    // Waehrend der Verbindung Port/Baud sperren - sonst inkonsistenter Zustand.
+    // Lock port/baud controls while connected to prevent inconsistent state.
     m_portBox->setEnabled(!connected);
     m_baudBox->setEnabled(!connected);
     m_refreshBtn->setEnabled(!connected);
@@ -180,7 +179,7 @@ void MainWindow::tryAutoConnect()
         }
     }
 
-    // Kein passender Port gefunden oder Oeffnen fehlgeschlagen - einmalig melden, dann still wiederholen.
+    // No matching port found or open failed — report once, then retry silently.
     if (!m_autoConnectTimer->isActive()) {
         m_output->appendPlainText("[Searching for AURIX port... (AURIX / Infineon / XMC / DAS)]");
         m_autoConnectTimer->start();
