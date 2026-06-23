@@ -32,6 +32,7 @@ private:
     QComboBox      *m_baudBox          = nullptr;
     QPushButton    *m_connectBtn       = nullptr;
     QPushButton    *m_refreshBtn       = nullptr;
+    QPushButton    *m_clearBtn         = nullptr;
     QPlainTextEdit *m_output           = nullptr;
     QSerialPort    *m_serial           = nullptr;
     QTimer         *m_autoConnectTimer = nullptr;

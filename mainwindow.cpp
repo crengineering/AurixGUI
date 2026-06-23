@@ -26,6 +26,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_baudBox    = new QComboBox;
     m_refreshBtn = new QPushButton("Aktualisieren");
     m_connectBtn = new QPushButton("Verbinden");
+    m_clearBtn   = new QPushButton("Leeren");
     m_output     = new QPlainTextEdit;
     m_output->setReadOnly(true);
 
@@ -43,6 +44,7 @@ MainWindow::MainWindow(QWidget *parent)
     topRow->addWidget(m_baudBox);
     topRow->addWidget(m_refreshBtn);
     topRow->addWidget(m_connectBtn);
+    topRow->addWidget(m_clearBtn);
 
     auto *layout = new QVBoxLayout;
     layout->addLayout(topRow);
@@ -55,6 +57,7 @@ MainWindow::MainWindow(QWidget *parent)
     // ---- Signals/Slots verbinden ----
     connect(m_refreshBtn, &QPushButton::clicked,    this, &MainWindow::refreshPorts);
     connect(m_connectBtn, &QPushButton::clicked,    this, &MainWindow::toggleConnection);
+    connect(m_clearBtn,   &QPushButton::clicked,    m_output, &QPlainTextEdit::clear);
     connect(m_serial,     &QSerialPort::readyRead,  this, &MainWindow::readData);
     connect(m_serial,     &QSerialPort::errorOccurred, this, &MainWindow::handleError);
 
