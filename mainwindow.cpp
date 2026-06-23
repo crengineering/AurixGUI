@@ -24,9 +24,9 @@ MainWindow::MainWindow(QWidget *parent)
     // ---- Widgets erzeugen ----
     m_portBox    = new QComboBox;
     m_baudBox    = new QComboBox;
-    m_refreshBtn = new QPushButton("Aktualisieren");
-    m_connectBtn = new QPushButton("Verbinden");
-    m_clearBtn   = new QPushButton("Leeren");
+    m_refreshBtn = new QPushButton("Refresh");
+    m_connectBtn = new QPushButton("Connect");
+    m_clearBtn   = new QPushButton("Clear");
     m_output     = new QPlainTextEdit;
     m_output->setReadOnly(true);
 
@@ -40,7 +40,7 @@ MainWindow::MainWindow(QWidget *parent)
     auto *topRow = new QHBoxLayout;
     topRow->addWidget(new QLabel("Port:"));
     topRow->addWidget(m_portBox, 1);
-    topRow->addWidget(new QLabel("Baud:"));
+    topRow->addWidget(new QLabel("Baud rate:"));
     topRow->addWidget(m_baudBox);
     topRow->addWidget(m_refreshBtn);
     topRow->addWidget(m_connectBtn);
@@ -81,7 +81,7 @@ void MainWindow::refreshPorts()
     }
 
     if (m_portBox->count() == 0)
-        m_output->appendPlainText("[Kein serieller Port gefunden]");
+        m_output->appendPlainText("[No serial port found]");
 }
 
 void MainWindow::toggleConnection()
@@ -92,7 +92,7 @@ void MainWindow::toggleConnection()
         m_autoConnectTimer->stop();
         m_serial->close();
         setConnectedState(false);
-        m_output->appendPlainText("[Getrennt]");
+        m_output->appendPlainText("[Disconnected]");
         return;
     }
 
@@ -110,11 +110,11 @@ void MainWindow::toggleConnection()
     if (m_serial->open(QIODevice::ReadOnly)) {
         setConnectedState(true);
         m_output->appendPlainText(
-            QString("[Verbunden: %1 @ %2 Baud]")
+            QString("[Connected: %1 @ %2 Baud]")
                 .arg(m_serial->portName())
                 .arg(m_serial->baudRate()));
     } else {
-        m_output->appendPlainText("[Oeffnen fehlgeschlagen: " + m_serial->errorString() + "]");
+        m_output->appendPlainText("[Failed to open: " + m_serial->errorString() + "]");
     }
 }
 
@@ -135,7 +135,7 @@ void MainWindow::handleError(QSerialPort::SerialPortError error)
 {
     // ResourceError = Port verschwunden (z.B. Board abgezogen / Kabel raus).
     if (error == QSerialPort::ResourceError) {
-        m_output->appendPlainText("[Verbindungsfehler: " + m_serial->errorString() + "]");
+        m_output->appendPlainText("[Connection error: " + m_serial->errorString() + "]");
         if (m_serial->isOpen())
             m_serial->close();
         setConnectedState(false);
@@ -146,7 +146,7 @@ void MainWindow::handleError(QSerialPort::SerialPortError error)
 
 void MainWindow::setConnectedState(bool connected)
 {
-    m_connectBtn->setText(connected ? "Trennen" : "Verbinden");
+    m_connectBtn->setText(connected ? "Disconnect" : "Connect");
     // Waehrend der Verbindung Port/Baud sperren - sonst inkonsistenter Zustand.
     m_portBox->setEnabled(!connected);
     m_baudBox->setEnabled(!connected);
@@ -182,7 +182,7 @@ void MainWindow::tryAutoConnect()
 
     // Kein passender Port gefunden oder Oeffnen fehlgeschlagen - einmalig melden, dann still wiederholen.
     if (!m_autoConnectTimer->isActive()) {
-        m_output->appendPlainText("[Suche AURIX-Port... (AURIX / Infineon / XMC / DAS)]");
+        m_output->appendPlainText("[Searching for AURIX port... (AURIX / Infineon / XMC / DAS)]");
         m_autoConnectTimer->start();
     }
 }
