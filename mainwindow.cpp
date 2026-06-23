@@ -9,6 +9,7 @@
 #include <QWidget>
 #include <QTextCursor>
 #include <QSerialPortInfo>
+#include <QTimer>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -57,7 +58,10 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_serial,     &QSerialPort::readyRead,  this, &MainWindow::readData);
     connect(m_serial,     &QSerialPort::errorOccurred, this, &MainWindow::handleError);
 
-    refreshPorts();
+    m_autoConnectTimer = new QTimer(this);
+    m_autoConnectTimer->setInterval(2000);
+    connect(m_autoConnectTimer, &QTimer::timeout, this, &MainWindow::tryAutoConnect);
+    tryAutoConnect();
 }
 
 void MainWindow::refreshPorts()
@@ -81,6 +85,8 @@ void MainWindow::toggleConnection()
 {
     // Ist der Port offen -> trennen.
     if (m_serial->isOpen()) {
+        m_autoConnect = false;
+        m_autoConnectTimer->stop();
         m_serial->close();
         setConnectedState(false);
         m_output->appendPlainText("[Getrennt]");
@@ -130,6 +136,8 @@ void MainWindow::handleError(QSerialPort::SerialPortError error)
         if (m_serial->isOpen())
             m_serial->close();
         setConnectedState(false);
+        m_autoConnect = true;
+        tryAutoConnect();
     }
 }
 
@@ -140,4 +148,38 @@ void MainWindow::setConnectedState(bool connected)
     m_portBox->setEnabled(!connected);
     m_baudBox->setEnabled(!connected);
     m_refreshBtn->setEnabled(!connected);
+}
+
+void MainWindow::tryAutoConnect()
+{
+    if (m_serial->isOpen())
+        return;
+
+    refreshPorts();
+
+    static const QStringList keywords = {"AURIX", "Infineon", "XMC", "DAS"};
+    const auto ports = QSerialPortInfo::availablePorts();
+
+    for (const QSerialPortInfo &info : ports) {
+        for (const QString &kw : keywords) {
+            if (info.description().contains(kw, Qt::CaseInsensitive)) {
+                const int idx = m_portBox->findData(info.portName());
+                if (idx >= 0) {
+                    m_portBox->setCurrentIndex(idx);
+                    toggleConnection();
+                }
+                if (m_serial->isOpen()) {
+                    m_autoConnectTimer->stop();
+                    return;
+                }
+                break;
+            }
+        }
+    }
+
+    // Kein passender Port gefunden oder Oeffnen fehlgeschlagen - einmalig melden, dann still wiederholen.
+    if (!m_autoConnectTimer->isActive()) {
+        m_output->appendPlainText("[Suche AURIX-Port... (AURIX / Infineon / XMC / DAS)]");
+        m_autoConnectTimer->start();
+    }
 }
