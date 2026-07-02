@@ -2,7 +2,9 @@
 #define XCPPANEL_H
 
 #include <QWidget>
+#include <QElapsedTimer>
 #include "xcpclient.h"
+#include "mf4writer.h"
 
 class QLineEdit;
 class QSpinBox;
@@ -10,7 +12,9 @@ class QPushButton;
 class QLabel;
 class QPlainTextEdit;
 class QTableWidget;
+class QCheckBox;
 class QTimer;
+class PlotWidget;
 
 // "Ethernet (XCP)" tab: connects to the XCP slave on the TC399. Contains
 // three sub-tabs: live measurements, diagnostics interpretation (bitmask
@@ -33,13 +37,20 @@ private slots:
     void pollTick();
     void readCalibration();
     void writeCalibration();
+    void onDaqStarted();
+    void onDaqFailed();
+    void startLogging();
+    void stopLogging();
+    void saveLogging();
 
 private:
     QWidget *buildLiveTab();
     QWidget *buildDiagTab();
     QWidget *buildCalTab();
+    QWidget *buildPlotTab();
     void     setConnectedState(bool connected);
     void     updateDiagTable(quint32 status);
+    void     updateLogStatus();
 
     XcpClient      *m_client     = nullptr;
     QTimer         *m_pollTimer  = nullptr;
@@ -72,6 +83,20 @@ private:
     QPushButton    *m_calReadBtn  = nullptr;
     QPushButton    *m_calWriteBtn = nullptr;
     int             m_calWritesPending = 0;
+
+    // plot & logging tab
+    PlotWidget     *m_plot        = nullptr;
+    QCheckBox      *m_plotChk[5]  = {};
+    int             m_series[5]   = {};
+    QPushButton    *m_logStartBtn = nullptr;
+    QPushButton    *m_logStopBtn  = nullptr;
+    QPushButton    *m_logSaveBtn  = nullptr;
+    QLabel         *m_logStatus   = nullptr;
+    Mf4Writer       m_mf4;
+    bool            m_logging     = false;
+    QElapsedTimer   m_timeBase;         // running since connect (plot x-axis)
+    qint64          m_logStartMs  = 0;
+    qint64          m_lastDaqMs   = 0;  // DAQ stream watchdog
 };
 
 #endif // XCPPANEL_H

@@ -11,6 +11,14 @@ constexpr quint8 CMD_GET_ID         = 0xFA;
 constexpr quint8 CMD_UPLOAD         = 0xF5;
 constexpr quint8 CMD_SHORT_UPLOAD   = 0xF4;
 constexpr quint8 CMD_SHORT_DOWNLOAD = 0xED;
+constexpr quint8 CMD_SET_DAQ_PTR    = 0xE2;
+constexpr quint8 CMD_WRITE_DAQ      = 0xE1;
+constexpr quint8 CMD_SET_DAQ_MODE   = 0xE0;
+constexpr quint8 CMD_START_STOP_DAQ = 0xDE;
+constexpr quint8 CMD_FREE_DAQ       = 0xD6;
+constexpr quint8 CMD_ALLOC_DAQ      = 0xD5;
+constexpr quint8 CMD_ALLOC_ODT      = 0xD4;
+constexpr quint8 CMD_ALLOC_ODT_ENTRY = 0xD3;
 
 constexpr quint8 PID_RES = 0xFF;
 constexpr quint8 PID_ERR = 0xFE;
@@ -66,6 +74,8 @@ void XcpClient::disconnectFromSlave()
     m_queue.clear();
     m_busy      = false;
     m_connected = false;
+    m_daqActive = false;
+    m_verValid  = false;
     emit disconnected();
 }
 
@@ -113,6 +123,35 @@ void XcpClient::writeMemory(quint32 address, const QByteArray &data)
     enqueue({ReqType::MemWrite, cmd, address});
 }
 
+void XcpClient::startDaq(quint32 entryAddress, quint8 entrySize)
+{
+    if (!m_connected)
+        return;
+
+    auto simple = [this](std::initializer_list<quint8> bytes) {
+        QByteArray p;
+        for (quint8 b : bytes)
+            p.append(char(b));
+        enqueue({ReqType::DaqCmd, p, 0});
+    };
+
+    simple({CMD_FREE_DAQ});
+    simple({CMD_ALLOC_DAQ, 0x00, 0x01, 0x00});                  // 1 list
+    simple({CMD_ALLOC_ODT, 0x00, 0x00, 0x00, 0x01});            // 1 ODT
+    simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x00, 0x01});// 1 entry
+    simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, 0x00, 0x00});
+
+    QByteArray wr(8, '\0');
+    wr[0] = char(CMD_WRITE_DAQ);
+    wr[1] = char(0xFF);                                          // no bit offset
+    wr[2] = char(entrySize);
+    qToLittleEndian<quint32>(entryAddress, wr.data() + 4);
+    enqueue({ReqType::DaqCmd, wr, 0});
+
+    simple({CMD_SET_DAQ_MODE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00});
+    enqueue({ReqType::DaqStart, QByteArray("\xDE\x01\x00\x00", 4), 0});
+}
+
 void XcpClient::enqueue(Request req)
 {
     m_queue.enqueue(std::move(req));
@@ -152,8 +191,43 @@ void XcpClient::onReadyRead()
         if (4 + len > dgram.size())
             continue;                            // malformed
 
-        handleResponse(dgram.mid(4, len));
+        const QByteArray packet = dgram.mid(4, len);
+        const quint8 pid = quint8(packet[0]);
+
+        if (pid < 0xFC) {                        // DTO: DAQ data (PID = ODT nr)
+            handleDaqFrame(packet);
+            continue;
+        }
+        handleResponse(packet);
     }
+}
+
+void XcpClient::handleDaqFrame(const QByteArray &packet)
+{
+    // single ODT 0: tick u32, dts f, dtsc f, vdd f, vddp3 f, vext f,
+    // raw codes u32, diagStatus u32  (= Xcp_Data + 8, 32 bytes)
+    if (quint8(packet[0]) != 0 || packet.size() < 1 + 32)
+        return;
+
+    const char *d = packet.constData() + 1;
+    Measurements m;
+    m.valid    = m_verValid;
+    m.verMajor = m_verMajor;
+    m.verMinor = m_verMinor;
+    m.verStep  = m_verStep;
+    m.tickMs   = qFromLittleEndian<quint32>(d);
+    auto readF = [d](int off) {
+        float f = 0.0f;
+        std::memcpy(&f, d + off, sizeof(f));
+        return f;
+    };
+    m.dieTempC   = readF(4);
+    m.dtscTempC  = readF(8);
+    m.vddCore    = readF(12);
+    m.vddp3      = readF(16);
+    m.vext       = readF(20);
+    m.diagStatus = qFromLittleEndian<quint32>(d + 28);
+    emit measurementsReceived(m);
 }
 
 void XcpClient::handleResponse(const QByteArray &packet)
@@ -173,6 +247,17 @@ void XcpClient::handleResponse(const QByteArray &packet)
             || m_current.type == ReqType::UploadId) {
             dropConnection("Verbindungsaufbau fehlgeschlagen");
             return;
+        }
+        if (m_current.type == ReqType::DaqCmd || m_current.type == ReqType::DaqStart) {
+            // abort the remaining setup steps, panel falls back to polling
+            QQueue<Request> keep;
+            while (!m_queue.isEmpty()) {
+                Request r = m_queue.dequeue();
+                if (r.type != ReqType::DaqCmd && r.type != ReqType::DaqStart)
+                    keep.enqueue(r);
+            }
+            m_queue = keep;
+            emit daqFailed();
         }
         sendNext();
         return;
@@ -227,6 +312,10 @@ void XcpClient::handleResponse(const QByteArray &packet)
             m.vddp3      = readF(24);
             m.vext       = readF(28);
             m.diagStatus = qFromLittleEndian<quint32>(d + 36);
+            m_verMajor = m.verMajor;             // cache for DAQ frames
+            m_verMinor = m.verMinor;
+            m_verStep  = m.verStep;
+            m_verValid = m.valid;
             emit measurementsReceived(m);
         }
         break;
@@ -237,6 +326,14 @@ void XcpClient::handleResponse(const QByteArray &packet)
 
     case ReqType::MemWrite:
         emit memoryWritten(m_current.addr);
+        break;
+
+    case ReqType::DaqCmd:
+        break;                                   // intermediate setup step
+
+    case ReqType::DaqStart:
+        m_daqActive = true;
+        emit daqStarted();
         break;
     }
 
@@ -255,6 +352,8 @@ void XcpClient::dropConnection(const QString &reason)
     m_queue.clear();
     m_busy      = false;
     m_connected = false;
+    m_daqActive = false;
+    m_verValid  = false;
     emit errorOccurred(reason);
     emit disconnected();
 }

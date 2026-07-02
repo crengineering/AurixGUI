@@ -1,5 +1,9 @@
 #include "xcppanel.h"
+#include "plotwidget.h"
 
+#include <QCheckBox>
+#include <QDateTime>
+#include <QFileDialog>
 #include <QLineEdit>
 #include <QSpinBox>
 #include <QPushButton>
@@ -87,6 +91,7 @@ XcpPanel::XcpPanel(QWidget *parent)
     subTabs->addTab(buildLiveTab(), "Messwerte");
     subTabs->addTab(buildDiagTab(), "Diagnose");
     subTabs->addTab(buildCalTab(),  "Kalibrierung");
+    subTabs->addTab(buildPlotTab(), "Plot && Log");
 
     auto *layout = new QVBoxLayout(this);
     layout->addLayout(topRow);
@@ -102,6 +107,8 @@ XcpPanel::XcpPanel(QWidget *parent)
     connect(m_client, &XcpClient::measurementsReceived, this, &XcpPanel::onMeasurements);
     connect(m_client, &XcpClient::memoryRead,           this, &XcpPanel::onMemoryRead);
     connect(m_client, &XcpClient::memoryWritten,        this, &XcpPanel::onMemoryWritten);
+    connect(m_client, &XcpClient::daqStarted,           this, &XcpPanel::onDaqStarted);
+    connect(m_client, &XcpClient::daqFailed,            this, &XcpPanel::onDaqFailed);
     connect(m_client, &XcpClient::errorOccurred,        this, &XcpPanel::onError);
 }
 
@@ -210,6 +217,56 @@ QWidget *XcpPanel::buildCalTab()
     return tab;
 }
 
+QWidget *XcpPanel::buildPlotTab()
+{
+    m_plot = new PlotWidget;
+    const struct { const char *name; QColor color; bool on; } defs[5] = {
+        {"DTS [°C]",   QColor(200, 60, 60),  true},
+        {"DTSC [°C]",  QColor(230, 140, 40), true},
+        {"VDD [V]",    QColor(60, 120, 200), false},
+        {"VDDP3 [V]",  QColor(60, 180, 90),  false},
+        {"VEXT [V]",   QColor(140, 80, 200), false},
+    };
+
+    auto *chkRow = new QHBoxLayout;
+    for (int i = 0; i < 5; ++i) {
+        m_series[i]  = m_plot->addSeries(QString::fromUtf8(defs[i].name), defs[i].color);
+        m_plotChk[i] = new QCheckBox(QString::fromUtf8(defs[i].name));
+        m_plotChk[i]->setChecked(defs[i].on);
+        m_plot->setSeriesVisible(m_series[i], defs[i].on);
+        const int idx = i;
+        connect(m_plotChk[i], &QCheckBox::toggled, this, [this, idx](bool on) {
+            m_plot->setSeriesVisible(m_series[idx], on);
+        });
+        chkRow->addWidget(m_plotChk[i]);
+    }
+    chkRow->addStretch(1);
+
+    m_logStartBtn = new QPushButton("Start Log");
+    m_logStopBtn  = new QPushButton("Stop Log");
+    m_logSaveBtn  = new QPushButton("Speichern...");
+    m_logStatus   = new QLabel("Kein Log");
+    m_logStartBtn->setEnabled(false);
+    m_logStopBtn->setEnabled(false);
+    m_logSaveBtn->setEnabled(false);
+    connect(m_logStartBtn, &QPushButton::clicked, this, &XcpPanel::startLogging);
+    connect(m_logStopBtn,  &QPushButton::clicked, this, &XcpPanel::stopLogging);
+    connect(m_logSaveBtn,  &QPushButton::clicked, this, &XcpPanel::saveLogging);
+
+    auto *logRow = new QHBoxLayout;
+    logRow->addWidget(m_logStartBtn);
+    logRow->addWidget(m_logStopBtn);
+    logRow->addWidget(m_logSaveBtn);
+    logRow->addWidget(m_logStatus, 1);
+
+    auto *tab    = new QWidget;
+    auto *layout = new QVBoxLayout(tab);
+    layout->addLayout(chkRow);
+    layout->addWidget(m_plot, 1);
+    layout->addLayout(logRow);
+    return tab;
+}
+
 void XcpPanel::toggleConnection()
 {
     if (m_client->isConnected()) {
@@ -227,8 +284,23 @@ void XcpPanel::onConnected(const QString &ident)
     m_identLbl->setText(ident.isEmpty() ? "(unbekannt)" : ident);
     m_log->appendPlainText("[Verbunden: " + m_identLbl->text() + "]");
     setConnectedState(true);
+    m_timeBase.restart();
+    m_plot->clearData();
+    m_lastDaqMs = 0;
     m_pollTimer->start();
-    readCalibration();          // populate the calibration tab right away
+    readCalibration();                          // populate the calibration tab
+    m_client->pollMeasurements(XCP_DATA_ADDR);  // one poll: version + magic
+    m_client->startDaq(XCP_DATA_ADDR + 8, 32);  // then event-driven streaming
+}
+
+void XcpPanel::onDaqStarted()
+{
+    m_log->appendPlainText("[DAQ gestartet - Messwerte kommen event-getrieben (100 ms)]");
+}
+
+void XcpPanel::onDaqFailed()
+{
+    m_log->appendPlainText("[DAQ nicht verfuegbar - Fallback auf Polling]");
 }
 
 void XcpPanel::onDisconnected()
@@ -261,6 +333,82 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
     m_vextLbl->setText(QString::number(double(m.vext), 'f', 3) + " V");
 
     updateDiagTable(m.diagStatus);
+
+    // plot + logging feed
+    const double t = double(m_timeBase.elapsed()) / 1000.0;
+    m_lastDaqMs = m_timeBase.elapsed();
+    m_plot->appendPoint(m_series[0], t, double(m.dieTempC));
+    m_plot->appendPoint(m_series[1], t, double(m.dtscTempC));
+    m_plot->appendPoint(m_series[2], t, double(m.vddCore));
+    m_plot->appendPoint(m_series[3], t, double(m.vddp3));
+    m_plot->appendPoint(m_series[4], t, double(m.vext));
+
+    if (m_logging) {
+        Mf4Writer::Sample s;
+        s.t     = double(m_timeBase.elapsed() - m_logStartMs) / 1000.0;
+        s.dts   = m.dieTempC;
+        s.dtsc  = m.dtscTempC;
+        s.vdd   = m.vddCore;
+        s.vddp3 = m.vddp3;
+        s.vext  = m.vext;
+        s.tick  = m.tickMs;
+        s.diag  = m.diagStatus;
+        m_mf4.append(s);
+        updateLogStatus();
+    }
+}
+
+void XcpPanel::startLogging()
+{
+    m_mf4.clear();
+    m_logStartMs = m_timeBase.elapsed();
+    m_logging    = true;
+    m_logStartBtn->setEnabled(false);
+    m_logStopBtn->setEnabled(true);
+    m_logSaveBtn->setEnabled(false);
+    m_log->appendPlainText("[Logging gestartet]");
+    updateLogStatus();
+}
+
+void XcpPanel::stopLogging()
+{
+    m_logging = false;
+    m_logStartBtn->setEnabled(m_client->isConnected());
+    m_logStopBtn->setEnabled(false);
+    m_logSaveBtn->setEnabled(m_mf4.count() > 0);
+    m_log->appendPlainText(QString("[Logging gestoppt: %1 Samples]").arg(m_mf4.count()));
+    updateLogStatus();
+}
+
+void XcpPanel::saveLogging()
+{
+    const QString suggested = "aurix_log_"
+        + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".mf4";
+    const QString path = QFileDialog::getSaveFileName(
+        this, "MF4-Log speichern", suggested, "ASAM MDF 4 (*.mf4)");
+    if (path.isEmpty())
+        return;
+
+    QString err;
+    if (m_mf4.save(path, &err))
+        m_log->appendPlainText("[MF4 gespeichert: " + path + "]");
+    else
+        m_log->appendPlainText("[MF4 speichern fehlgeschlagen: " + err + "]");
+}
+
+void XcpPanel::updateLogStatus()
+{
+    if (m_logging) {
+        const double secs = double(m_timeBase.elapsed() - m_logStartMs) / 1000.0;
+        m_logStatus->setText(QString("Aufzeichnung laeuft: %1 Samples (%2 s)")
+                                 .arg(m_mf4.count())
+                                 .arg(secs, 0, 'f', 1));
+    } else if (m_mf4.count() > 0) {
+        m_logStatus->setText(QString("Log bereit zum Speichern: %1 Samples")
+                                 .arg(m_mf4.count()));
+    } else {
+        m_logStatus->setText("Kein Log");
+    }
 }
 
 void XcpPanel::updateDiagTable(quint32 status)
@@ -351,6 +499,14 @@ void XcpPanel::onError(const QString &message)
 
 void XcpPanel::pollTick()
 {
+    if (m_client->daqActive()) {
+        // DAQ streams by itself; the timer only watches for silence
+        if (m_lastDaqMs > 0 && m_timeBase.elapsed() - m_lastDaqMs > 1500) {
+            m_log->appendPlainText("[DAQ-Strom abgerissen]");
+            m_client->disconnectFromSlave();
+        }
+        return;
+    }
     m_client->pollMeasurements(XCP_DATA_ADDR);
 }
 
@@ -361,6 +517,12 @@ void XcpPanel::setConnectedState(bool connected)
     m_portBox->setEnabled(!connected);
     m_calReadBtn->setEnabled(connected);
     m_calWriteBtn->setEnabled(connected);
+
+    if (!connected && m_logging)
+        stopLogging();
+    m_logStartBtn->setEnabled(connected && !m_logging);
+    m_logStopBtn->setEnabled(connected && m_logging);
+    m_logSaveBtn->setEnabled(!m_logging && m_mf4.count() > 0);
 
     if (!connected) {
         m_versionLbl->setText("-");

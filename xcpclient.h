@@ -41,12 +41,20 @@ public:
     void readMemory(quint32 address, quint8 len);     // -> memoryRead()
     void writeMemory(quint32 address, const QByteArray &data); // -> memoryWritten()
 
+    // Configure and start the DAQ list (event channel 0, 100 ms on the
+    // board): one ODT entry covering tick..diagStatus. Measurements then
+    // arrive event-driven via measurementsReceived() without polling.
+    void startDaq(quint32 entryAddress, quint8 entrySize);
+    bool daqActive() const { return m_daqActive; }
+
 signals:
     void connected(const QString &identString);
     void disconnected();
     void measurementsReceived(const XcpClient::Measurements &m);
     void memoryRead(quint32 address, const QByteArray &data);
     void memoryWritten(quint32 address);
+    void daqStarted();
+    void daqFailed();
     void errorOccurred(const QString &message);
 
 private slots:
@@ -54,7 +62,8 @@ private slots:
     void onTimeout();
 
 private:
-    enum class ReqType { Connect, GetId, UploadId, Poll, MemRead, MemWrite };
+    enum class ReqType { Connect, GetId, UploadId, Poll, MemRead, MemWrite,
+                         DaqCmd, DaqStart };
     struct Request {
         ReqType    type;
         QByteArray packet;
@@ -64,6 +73,7 @@ private:
     void enqueue(Request req);
     void sendNext();
     void handleResponse(const QByteArray &packet);
+    void handleDaqFrame(const QByteArray &packet);
     void dropConnection(const QString &reason);
 
     QUdpSocket     *m_socket  = nullptr;
@@ -76,6 +86,11 @@ private:
     Request         m_current;
     QQueue<Request> m_queue;
     quint32         m_identLen  = 0;
+    bool            m_daqActive = false;
+    quint8          m_verMajor  = 0;    // cached from the last poll; DAQ
+    quint8          m_verMinor  = 0;    // frames do not carry the version
+    quint8          m_verStep   = 0;
+    bool            m_verValid  = false;
 };
 
 #endif // XCPCLIENT_H

@@ -20,6 +20,10 @@ add_executable(SerialMonitor
     xcpclient.h
     xcppanel.cpp
     xcppanel.h
+    plotwidget.cpp
+    plotwidget.h
+    mf4writer.cpp
+    mf4writer.h
 )
 
 target_link_libraries(SerialMonitor PRIVATE
