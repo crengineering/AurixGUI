@@ -1,6 +1,8 @@
 #include "mainwindow.h"
+#include "xcppanel.h"
 
 #include <QCheckBox>
+#include <QTabWidget>
 #include <QComboBox>
 #include <QPushButton>
 #include <QPlainTextEdit>
@@ -15,7 +17,7 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle("AURIX Serial Monitor");
+    setWindowTitle("AURIX Monitor");
     resize(700, 500);
 
     // 'this' as parent: Qt destroys m_serial automatically with the window.
@@ -56,9 +58,14 @@ MainWindow::MainWindow(QWidget *parent)
     layout->addLayout(topRow);
     layout->addWidget(m_output, 1);
 
-    auto *central = new QWidget;
-    central->setLayout(layout);
-    setCentralWidget(central);
+    auto *uartTab = new QWidget;
+    uartTab->setLayout(layout);
+
+    // Tabs: UART monitor (existing) + Ethernet/XCP live view.
+    auto *tabs = new QTabWidget;
+    tabs->addTab(uartTab, "UART");
+    tabs->addTab(new XcpPanel, "Ethernet (XCP)");
+    setCentralWidget(tabs);
 
     // ---- Signals/Slots ----
     connect(m_refreshBtn, &QPushButton::clicked,    this, &MainWindow::refreshPorts);
@@ -132,7 +139,7 @@ void MainWindow::readData()
 
     // "CPU0 started" is the first UART message after a fresh flash — use it
     // as a reliable reset marker to clear old output automatically.
-    if (m_autoClearChk->isChecked() && data.contains("CPU0 started"))
+    if (m_autoClearChk->isChecked() && data.contains("CPU1 started"))
         m_output->clear();
 
     // insertPlainText instead of appendPlainText: append would force a new line

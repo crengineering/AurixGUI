@@ -10,15 +10,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
 # Sucht die Qt6-Komponenten. SerialPort ist das Modul fuer QSerialPort.
-find_package(Qt6 REQUIRED COMPONENTS Widgets SerialPort)
+find_package(Qt6 REQUIRED COMPONENTS Widgets SerialPort Network)
 
 add_executable(SerialMonitor
     main.cpp
     mainwindow.cpp
     mainwindow.h
+    xcpclient.cpp
+    xcpclient.h
+    xcppanel.cpp
+    xcppanel.h
 )
 
 target_link_libraries(SerialMonitor PRIVATE
     Qt6::Widgets
     Qt6::SerialPort
+    Qt6::Network
 )
