@@ -15,7 +15,7 @@ constexpr quint8 PID_RES = 0xFF;
 constexpr quint8 PID_ERR = 0xFE;
 
 constexpr quint32 XCP_DATA_MAGIC = 0x41555258;  // must match Measurements.h
-constexpr int     XCP_DATA_SIZE  = 16;
+constexpr int     XCP_DATA_SIZE  = 36;
 constexpr int     TIMEOUT_MS     = 500;
 }
 
@@ -162,9 +162,16 @@ void XcpClient::handleResponse(const QByteArray &packet)
             m.verMinor = quint8(d[5]);
             m.verStep  = quint8(d[6]);
             m.tickMs   = qFromLittleEndian<quint32>(d + 8);
-            float temp = 0.0f;
-            std::memcpy(&temp, d + 12, sizeof(temp));        // IEEE754 LE
-            m.dieTempC = temp;
+            auto readF = [d](int off) {
+                float f = 0.0f;
+                std::memcpy(&f, d + off, sizeof(f));         // IEEE754 LE
+                return f;
+            };
+            m.dieTempC  = readF(12);
+            m.dtscTempC = readF(16);
+            m.vddCore   = readF(20);
+            m.vddp3     = readF(24);
+            m.vext      = readF(28);
             emit measurementsReceived(m);
         }
         m_pollPending = false;

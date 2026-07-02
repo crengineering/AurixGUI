@@ -17,12 +17,16 @@ class XcpClient : public QObject
 
 public:
     struct Measurements {
-        quint8  verMajor = 0;
-        quint8  verMinor = 0;
-        quint8  verStep  = 0;
-        quint32 tickMs   = 0;
-        float   dieTempC = 0.0f;
-        bool    valid    = false;   // magic word matched
+        quint8  verMajor  = 0;
+        quint8  verMinor  = 0;
+        quint8  verStep   = 0;
+        quint32 tickMs    = 0;
+        float   dieTempC  = 0.0f;   // PMS DTS (standby domain)
+        float   dtscTempC = 0.0f;   // SCU DTSC (core domain)
+        float   vddCore   = 0.0f;   // 1.25 V rail [V]
+        float   vddp3     = 0.0f;   // 3.3 V rail [V]
+        float   vext      = 0.0f;   // 5 V board supply [V]
+        bool    valid     = false;  // magic word matched
     };
 
     explicit XcpClient(QObject *parent = nullptr);

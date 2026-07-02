@@ -40,6 +40,10 @@ private:
     QLabel         *m_versionLbl = nullptr;
     QLabel         *m_uptimeLbl  = nullptr;
     QLabel         *m_tempLbl    = nullptr;
+    QLabel         *m_dtscLbl    = nullptr;
+    QLabel         *m_vddLbl     = nullptr;
+    QLabel         *m_vddp3Lbl   = nullptr;
+    QLabel         *m_vextLbl    = nullptr;
     QPlainTextEdit *m_log        = nullptr;
 };
 

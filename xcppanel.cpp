@@ -41,6 +41,10 @@ XcpPanel::XcpPanel(QWidget *parent)
     m_versionLbl = new QLabel("-");
     m_uptimeLbl  = new QLabel("-");
     m_tempLbl    = new QLabel("-");
+    m_dtscLbl    = new QLabel("-");
+    m_vddLbl     = new QLabel("-");
+    m_vddp3Lbl   = new QLabel("-");
+    m_vextLbl    = new QLabel("-");
 
     QFont bigFont = m_tempLbl->font();
     bigFont.setPointSize(bigFont.pointSize() * 2);
@@ -48,10 +52,14 @@ XcpPanel::XcpPanel(QWidget *parent)
     m_tempLbl->setFont(bigFont);
 
     auto *form = new QFormLayout;
-    form->addRow("Board:",            m_identLbl);
-    form->addRow("Software-Version:", m_versionLbl);
-    form->addRow("Uptime:",           m_uptimeLbl);
-    form->addRow("Die-Temperatur:",   m_tempLbl);
+    form->addRow("Board:",                  m_identLbl);
+    form->addRow("Software-Version:",       m_versionLbl);
+    form->addRow("Uptime:",                 m_uptimeLbl);
+    form->addRow("Die-Temperatur (DTS):",   m_tempLbl);
+    form->addRow("Die-Temperatur (DTSC):",  m_dtscLbl);
+    form->addRow("VDD 1.25 V:",             m_vddLbl);
+    form->addRow("VDDP3 3.3 V:",            m_vddp3Lbl);
+    form->addRow("VEXT 5 V:",               m_vextLbl);
 
     // ---- Log ----
     m_log = new QPlainTextEdit;
@@ -119,6 +127,10 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
                              .arg(s % 60, 2, 10, QChar('0')));
 
     m_tempLbl->setText(QString::number(double(m.dieTempC), 'f', 1) + " °C");
+    m_dtscLbl->setText(QString::number(double(m.dtscTempC), 'f', 1) + " °C");
+    m_vddLbl->setText(QString::number(double(m.vddCore), 'f', 3) + " V");
+    m_vddp3Lbl->setText(QString::number(double(m.vddp3), 'f', 3) + " V");
+    m_vextLbl->setText(QString::number(double(m.vext), 'f', 3) + " V");
 }
 
 void XcpPanel::onError(const QString &message)
@@ -141,6 +153,10 @@ void XcpPanel::setConnectedState(bool connected)
         m_versionLbl->setText("-");
         m_uptimeLbl->setText("-");
         m_tempLbl->setText("-");
+        m_dtscLbl->setText("-");
+        m_vddLbl->setText("-");
+        m_vddp3Lbl->setText("-");
+        m_vextLbl->setText("-");
         m_identLbl->setText("-");
     }
 }
