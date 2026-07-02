@@ -1,5 +1,6 @@
 #include "xcppanel.h"
 #include "plotwidget.h"
+#include "lampicon.h"
 
 #include <QCheckBox>
 #include <QDateTime>
@@ -40,9 +41,11 @@ constexpr DiagBit DIAG_BITS[] = {
     {8,  "VEXT-Unterspannung (5 V Board)"},
     {9,  "VEXT-Überspannung (5 V Board)"},
     {10, "Temperatursensoren unplausibel (Delta DTS/DTSC)"},
+    {11, "UART-Verbindung getrennt (kein Heartbeat vom PC)"},
     {31, "Kalibrierblock ungültig - Defaults geladen"},
 };
 constexpr int DIAG_ROWS = int(sizeof(DIAG_BITS) / sizeof(DIAG_BITS[0]));
+constexpr int DIAG_TAB_INDEX = 1;   // "Diagnose" position in the sub-tabs
 
 // calibration block layout (offset after magic = index * 4)
 struct CalParam { const char *name; const char *unit; };
@@ -87,15 +90,16 @@ XcpPanel::XcpPanel(QWidget *parent)
     topRow->addWidget(new QLabel("Board:"));
     topRow->addWidget(m_identLbl);
 
-    auto *subTabs = new QTabWidget;
-    subTabs->addTab(buildLiveTab(), "Messwerte");
-    subTabs->addTab(buildDiagTab(), "Diagnose");
-    subTabs->addTab(buildCalTab(),  "Kalibrierung");
-    subTabs->addTab(buildPlotTab(), "Plot && Log");
+    m_subTabs = new QTabWidget;
+    m_subTabs->addTab(buildLiveTab(), "Messwerte");
+    m_subTabs->addTab(buildDiagTab(), "Diagnose");
+    m_subTabs->addTab(buildCalTab(),  "Kalibrierung");
+    m_subTabs->addTab(buildPlotTab(), "Plot && Log");
+    updateDiagLamp();
 
     auto *layout = new QVBoxLayout(this);
     layout->addLayout(topRow);
-    layout->addWidget(subTabs, 1);
+    layout->addWidget(m_subTabs, 1);
 
     m_pollTimer = new QTimer(this);
     m_pollTimer->setInterval(POLL_MS);
@@ -160,6 +164,10 @@ QWidget *XcpPanel::buildDiagTab()
     bold.setPointSize(bold.pointSize() + 2);
     m_diagSummary->setFont(bold);
 
+    // Overall error lamp: one glance instead of scanning the bit table.
+    m_diagLamp = new QLabel;
+    m_diagLamp->setPixmap(lampPixmap(LampColor::Gray, 18));
+
     m_diagTable = new QTableWidget(DIAG_ROWS, 3);
     m_diagTable->setHorizontalHeaderLabels({"Bit", "Bedeutung", "Status"});
     m_diagTable->verticalHeader()->setVisible(false);
@@ -172,9 +180,13 @@ QWidget *XcpPanel::buildDiagTab()
     }
     m_diagTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
 
+    auto *summaryRow = new QHBoxLayout;
+    summaryRow->addWidget(m_diagLamp);
+    summaryRow->addWidget(m_diagSummary, 1);
+
     auto *tab    = new QWidget;
     auto *layout = new QVBoxLayout(tab);
-    layout->addWidget(m_diagSummary);
+    layout->addLayout(summaryRow);
     layout->addWidget(m_diagWordLbl);
     layout->addWidget(m_diagTable, 1);
     layout->addWidget(new QLabel("Interpretation siehe DIAGNOSTICS.md im Firmware-Repository."));
@@ -443,6 +455,20 @@ void XcpPanel::updateDiagTable(quint32 status)
 
     m_lastStatus = status;
     m_haveStatus = true;
+    updateDiagLamp();
+}
+
+// Error lamp in the Diagnose tab plus the matching sub-tab icon:
+// green = connected and no error bit set, red = at least one error,
+// gray = not connected (state unknown).
+void XcpPanel::updateDiagLamp()
+{
+    QColor color = LampColor::Gray;
+    if (m_haveStatus)
+        color = (m_lastStatus == 0) ? LampColor::Green : LampColor::Red;
+
+    m_diagLamp->setPixmap(lampPixmap(color, 18));
+    m_subTabs->setTabIcon(DIAG_TAB_INDEX, lampIcon(color));
 }
 
 void XcpPanel::readCalibration()
@@ -541,5 +567,8 @@ void XcpPanel::setConnectedState(bool connected)
             m_diagTable->item(i, 2)->setText("-");
             m_diagTable->item(i, 2)->setForeground(QBrush());
         }
+        updateDiagLamp();
     }
+
+    emit connectionChanged(connected);
 }

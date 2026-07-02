@@ -9,13 +9,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Header mit Q_OBJECT laufen. Ohne das funktionieren Signals/Slots nicht.
 set(CMAKE_AUTOMOC ON)
 
-# Sucht die Qt6-Komponenten. SerialPort ist das Modul fuer QSerialPort.
-find_package(Qt6 REQUIRED COMPONENTS Widgets SerialPort Network)
+# Sucht die Qt6-Komponenten. SerialPort ist das Modul fuer QSerialPort,
+# Concurrent fuer den Port-Scan im Hintergrund-Thread.
+find_package(Qt6 REQUIRED COMPONENTS Widgets SerialPort Network Concurrent)
 
 add_executable(SerialMonitor
     main.cpp
     mainwindow.cpp
     mainwindow.h
+    lampicon.h
     xcpclient.cpp
     xcpclient.h
     xcppanel.cpp
@@ -30,4 +32,5 @@ target_link_libraries(SerialMonitor PRIVATE
     Qt6::Widgets
     Qt6::SerialPort
     Qt6::Network
+    Qt6::Concurrent
 )

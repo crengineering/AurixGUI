@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "xcppanel.h"
+#include "lampicon.h"
 
 #include <QCheckBox>
 #include <QTabWidget>
@@ -13,6 +14,38 @@
 #include <QTextCursor>
 #include <QSerialPortInfo>
 #include <QTimer>
+#include <QtConcurrent/QtConcurrentRun>
+
+namespace {
+const QStringList kAurixKeywords = {"AURIX", "Infineon", "XMC", "DAS"};
+
+// Runs in a worker thread. Enumerating COM ports and especially the first
+// open() after a replug can block for seconds while Windows/the FTDI driver
+// re-initialises the device — that must never happen on the GUI thread.
+// The probe-open absorbs the slow first open, so the GUI thread afterwards
+// only opens a port that is already known to respond quickly.
+PortScan scanPortsWorker()
+{
+    PortScan scan;
+    scan.ports = QSerialPortInfo::availablePorts();
+
+    for (const QSerialPortInfo &info : scan.ports) {
+        for (const QString &kw : kAurixKeywords) {
+            if (info.description().contains(kw, Qt::CaseInsensitive)) {
+                QSerialPort probe;
+                probe.setPortName(info.portName());
+                if (probe.open(QIODevice::ReadOnly)) {
+                    probe.close();
+                    scan.aurixPort = info.portName();
+                    return scan;
+                }
+                break;   // matched but busy/not ready yet — try next port
+            }
+        }
+    }
+    return scan;
+}
+}
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -61,11 +94,19 @@ MainWindow::MainWindow(QWidget *parent)
     auto *uartTab = new QWidget;
     uartTab->setLayout(layout);
 
-    // Tabs: UART monitor (existing) + Ethernet/XCP live view.
-    auto *tabs = new QTabWidget;
-    tabs->addTab(uartTab, "UART");
-    tabs->addTab(new XcpPanel, "Ethernet (XCP)");
-    setCentralWidget(tabs);
+    // Tabs: UART monitor (existing) + Ethernet/XCP live view. The lamp icons
+    // show the connection state (green = connected, red = not connected)
+    // without having to open the tab.
+    auto *xcpPanel = new XcpPanel;
+    m_tabs = new QTabWidget;
+    m_tabs->addTab(uartTab, lampIcon(LampColor::Red), "UART");
+    m_tabs->addTab(xcpPanel, lampIcon(LampColor::Red), "Ethernet");
+    setCentralWidget(m_tabs);
+
+    connect(xcpPanel, &XcpPanel::connectionChanged, this, [this](bool connected) {
+        m_tabs->setTabIcon(1, lampIcon(connected ? LampColor::Green
+                                                 : LampColor::Red));
+    });
 
     // ---- Signals/Slots ----
     connect(m_refreshBtn, &QPushButton::clicked,    this, &MainWindow::refreshPorts);
@@ -77,24 +118,73 @@ MainWindow::MainWindow(QWidget *parent)
     m_autoConnectTimer = new QTimer(this);
     m_autoConnectTimer->setInterval(2000);
     connect(m_autoConnectTimer, &QTimer::timeout, this, &MainWindow::tryAutoConnect);
+    connect(&m_scanWatcher, &QFutureWatcher<PortScan>::finished,
+            this, &MainWindow::onPortScanFinished);
+
+    // Heartbeat: the firmware clears diag bit 11 (UART disconnected) as long
+    // as it keeps receiving bytes; > 2 s silence sets the bit. 500 ms gives
+    // a 4x margin. Byte value is irrelevant, any RX activity counts.
+    m_heartbeatTimer = new QTimer(this);
+    m_heartbeatTimer->setInterval(500);
+    connect(m_heartbeatTimer, &QTimer::timeout, this, [this]() {
+        if (m_serial->isOpen())
+            m_serial->write("H", 1);
+    });
+
     tryAutoConnect();
 }
 
 void MainWindow::refreshPorts()
 {
-    m_portBox->clear();
+    startPortScan();
+}
 
-    const auto ports = QSerialPortInfo::availablePorts();
-    for (const QSerialPortInfo &info : ports) {
-        QString label = info.portName();              // e.g. "COM3"
-        if (!info.description().isEmpty())
-            label += " - " + info.description();      // e.g. "COM3 - USB Serial Port"
-        // Display text + actual port name stored as item data.
-        m_portBox->addItem(label, info.portName());
+void MainWindow::startPortScan()
+{
+    if (m_scanWatcher.isRunning())
+        return;                     // one scan at a time is plenty
+    m_scanWatcher.setFuture(QtConcurrent::run(scanPortsWorker));
+}
+
+void MainWindow::onPortScanFinished()
+{
+    const PortScan scan = m_scanWatcher.result();
+
+    // While connected the combo is locked anyway — don't clobber it.
+    if (!m_serial->isOpen()) {
+        m_portBox->clear();
+        for (const QSerialPortInfo &info : scan.ports) {
+            QString label = info.portName();              // e.g. "COM3"
+            if (!info.description().isEmpty())
+                label += " - " + info.description();      // e.g. "COM3 - USB Serial Port"
+            // Display text + actual port name stored as item data.
+            m_portBox->addItem(label, info.portName());
+        }
+        if (m_portBox->count() == 0)
+            m_output->appendPlainText("[No serial port found]");
     }
 
-    if (m_portBox->count() == 0)
-        m_output->appendPlainText("[No serial port found]");
+    if (m_serial->isOpen() || !m_autoConnect)
+        return;
+
+    if (!scan.aurixPort.isEmpty()) {
+        const int idx = m_portBox->findData(scan.aurixPort);
+        if (idx >= 0) {
+            m_portBox->setCurrentIndex(idx);
+            toggleConnection();
+        }
+    }
+
+    if (m_serial->isOpen()) {
+        m_autoConnectTimer->stop();
+        return;
+    }
+
+    // No responsive AURIX port yet — report once, then retry silently.
+    if (!m_autoConnectTimer->isActive()) {
+        m_output->appendPlainText("[Searching for AURIX port... (AURIX / Infineon / XMC / DAS)]");
+        m_autoConnectTimer->start();
+    }
 }
 
 void MainWindow::toggleConnection()
@@ -119,8 +209,8 @@ void MainWindow::toggleConnection()
     m_serial->setStopBits(QSerialPort::OneStop);
     m_serial->setFlowControl(QSerialPort::NoFlowControl);
 
-    // Phase 1: read-only. Change to QIODevice::ReadWrite for Phase 2 (sending).
-    if (m_serial->open(QIODevice::ReadOnly)) {
+    // ReadWrite: reading the debug output plus sending the heartbeat byte.
+    if (m_serial->open(QIODevice::ReadWrite)) {
         setConnectedState(true);
         m_output->appendPlainText(
             QString("[Connected: %1 @ %2 Baud]")
@@ -169,6 +259,13 @@ void MainWindow::setConnectedState(bool connected)
     m_portBox->setEnabled(!connected);
     m_baudBox->setEnabled(!connected);
     m_refreshBtn->setEnabled(!connected);
+
+    m_tabs->setTabIcon(0, lampIcon(connected ? LampColor::Green
+                                             : LampColor::Red));
+    if (connected)
+        m_heartbeatTimer->start();
+    else
+        m_heartbeatTimer->stop();
 }
 
 void MainWindow::tryAutoConnect()
@@ -176,31 +273,6 @@ void MainWindow::tryAutoConnect()
     if (m_serial->isOpen())
         return;
 
-    refreshPorts();
-
-    static const QStringList keywords = {"AURIX", "Infineon", "XMC", "DAS"};
-    const auto ports = QSerialPortInfo::availablePorts();
-
-    for (const QSerialPortInfo &info : ports) {
-        for (const QString &kw : keywords) {
-            if (info.description().contains(kw, Qt::CaseInsensitive)) {
-                const int idx = m_portBox->findData(info.portName());
-                if (idx >= 0) {
-                    m_portBox->setCurrentIndex(idx);
-                    toggleConnection();
-                }
-                if (m_serial->isOpen()) {
-                    m_autoConnectTimer->stop();
-                    return;
-                }
-                break;
-            }
-        }
-    }
-
-    // No matching port found or open failed — report once, then retry silently.
-    if (!m_autoConnectTimer->isActive()) {
-        m_output->appendPlainText("[Searching for AURIX port... (AURIX / Infineon / XMC / DAS)]");
-        m_autoConnectTimer->start();
-    }
+    // All blocking work happens in the worker; onPortScanFinished connects.
+    startPortScan();
 }

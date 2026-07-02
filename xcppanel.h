@@ -12,11 +12,12 @@ class QPushButton;
 class QLabel;
 class QPlainTextEdit;
 class QTableWidget;
+class QTabWidget;
 class QCheckBox;
 class QTimer;
 class PlotWidget;
 
-// "Ethernet (XCP)" tab: connects to the XCP slave on the TC399. Contains
+// "Ethernet" tab: connects to the XCP slave on the TC399. Contains
 // three sub-tabs: live measurements, diagnostics interpretation (bitmask
 // per DIAGNOSTICS.md) and the calibration editor for the threshold block.
 class XcpPanel : public QWidget
@@ -25,6 +26,9 @@ class XcpPanel : public QWidget
 
 public:
     explicit XcpPanel(QWidget *parent = nullptr);
+
+signals:
+    void connectionChanged(bool connected);   // drives the tab lamp icon
 
 private slots:
     void toggleConnection();
@@ -52,8 +56,11 @@ private:
     void     updateDiagTable(quint32 status);
     void     updateLogStatus();
 
+    void     updateDiagLamp();
+
     XcpClient      *m_client     = nullptr;
     QTimer         *m_pollTimer  = nullptr;
+    QTabWidget     *m_subTabs    = nullptr;   // Diagnose tab carries a lamp icon
 
     // connection row
     QLineEdit      *m_hostEdit   = nullptr;
@@ -72,6 +79,7 @@ private:
     QPlainTextEdit *m_log        = nullptr;
 
     // diagnostics tab
+    QLabel         *m_diagLamp    = nullptr;  // green = all good, red = error
     QLabel         *m_diagWordLbl = nullptr;
     QLabel         *m_diagSummary = nullptr;
     QTableWidget   *m_diagTable   = nullptr;
