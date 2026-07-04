@@ -66,7 +66,7 @@ private:
 
     XcpClient      *m_client     = nullptr;
     QTimer         *m_pollTimer  = nullptr;
-    QTabWidget     *m_subTabs    = nullptr;   // Diagnose tab carries a lamp icon
+    QTabWidget     *m_subTabs    = nullptr;   // Diagnostics tab carries a lamp icon
 
     // connection row
     QLineEdit      *m_hostEdit   = nullptr;

@@ -240,12 +240,12 @@ void XcpClient::handleResponse(const QByteArray &packet)
     const quint8 pid = quint8(packet[0]);
     if (pid == PID_ERR) {
         const quint8 code = quint8(packet.size() > 1 ? packet[1] : 0);
-        emit errorOccurred(QString("XCP-Fehlercode 0x%1%2")
+        emit errorOccurred(QString("XCP error code 0x%1%2")
                                .arg(code, 2, 16, QChar('0'))
-                               .arg(code == 0x25 ? " (schreibgeschuetzt)" : ""));
+                               .arg(code == 0x25 ? " (write protected)" : ""));
         if (m_current.type == ReqType::Connect || m_current.type == ReqType::GetId
             || m_current.type == ReqType::UploadId) {
-            dropConnection("Verbindungsaufbau fehlgeschlagen");
+            dropConnection("Connection setup failed");
             return;
         }
         if (m_current.type == ReqType::DaqCmd || m_current.type == ReqType::DaqStart) {
@@ -342,8 +342,8 @@ void XcpClient::handleResponse(const QByteArray &packet)
 
 void XcpClient::onTimeout()
 {
-    dropConnection(m_connected ? QString("Timeout - Verbindung verloren")
-                               : QString("Keine Antwort vom Board (Timeout beim Verbinden)"));
+    dropConnection(m_connected ? QString("Timeout - connection lost")
+                               : QString("No response from the board (connect timeout)"));
 }
 
 void XcpClient::dropConnection(const QString &reason)
