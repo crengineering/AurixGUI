@@ -40,7 +40,12 @@ private slots:
     void onError(const QString &message);
     void pollTick();
     void readCalibration();
-    void writeCalibration();
+    void exportCalibration();
+    void importCalibration();
+    void readNvmParams();
+    void saveNvmToFlash();
+    void loadNvmDefaults();
+    void pollNvmCommand();
     void onDaqStarted();
     void onDaqFailed();
     void startLogging();
@@ -51,6 +56,7 @@ private:
     QWidget *buildLiveTab();
     QWidget *buildDiagTab();
     QWidget *buildCalTab();
+    QWidget *buildNvmTab();
     QWidget *buildPlotTab();
     void     setConnectedState(bool connected);
     void     updateDiagTable(quint32 status);
@@ -86,11 +92,26 @@ private:
     quint32         m_lastStatus  = 0;
     bool            m_haveStatus  = false;
 
-    // calibration tab
-    QTableWidget   *m_calTable    = nullptr;
-    QPushButton    *m_calReadBtn  = nullptr;
-    QPushButton    *m_calWriteBtn = nullptr;
-    int             m_calWritesPending = 0;
+    // calibration tab (RAM working page: individual writes, global read)
+    void            writeCalRow(int row);
+    QTableWidget   *m_calTable     = nullptr;
+    QPushButton    *m_calReadBtn   = nullptr;
+    QPushButton    *m_calExportBtn = nullptr;
+    QPushButton    *m_calImportBtn = nullptr;
+    QList<QPushButton *> m_calRowBtns;
+
+    // DFLASH tab (persistent Xcp_Nvm block)
+    void            writeNvmRow(int row);
+    void            sendNvmCommand(quint32 cmd, const QString &name);
+    void            setNvmBusy(bool busy);
+    QTableWidget   *m_nvmTable    = nullptr;
+    QPushButton    *m_nvmReadBtn  = nullptr;
+    QPushButton    *m_nvmSaveBtn  = nullptr;   // SAVE -> persist to DFLASH
+    QPushButton    *m_nvmDfltBtn  = nullptr;   // DFLT -> reload defaults
+    QLabel         *m_nvmStatus   = nullptr;
+    QList<QPushButton *> m_nvmRowBtns;
+    QString         m_nvmCmdName;
+    int             m_nvmRetries  = 0;
 
     // plot & logging tab
     PlotWidget     *m_plot        = nullptr;

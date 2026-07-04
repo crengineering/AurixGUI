@@ -18,6 +18,9 @@
 #include <QVBoxLayout>
 #include <QFormLayout>
 #include <QtEndian>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QFile>
 #include <cstring>
 
 namespace {
@@ -26,6 +29,27 @@ constexpr quint32 XCP_DATA_ADDR = 0x70030000;
 constexpr quint32 XCP_CAL_ADDR  = 0x70030100;
 constexpr int     CAL_VALUES    = 15;   // floats after the magic word
 constexpr int     POLL_MS       = 100;  // 10 Hz
+
+// Persistent parameter block Xcp_Nvm (firmware >= v1.6.0), strictly
+// separated from the RAM-only cal block. Only this block is stored in the
+// DFLASH. The master writes SAVE/DFLT into the command word, the firmware
+// executes it in its 100 ms task and clears the word back to 0 (handshake).
+constexpr quint32 XCP_NVM_ADDR    = 0x70030200;
+constexpr quint32 NVM_CMD_ADDR    = XCP_NVM_ADDR + 0x04;
+constexpr quint32 NVM_PARAM_ADDR  = XCP_NVM_ADDR + 0x08;
+constexpr quint32 NVM_CMD_SAVE    = 0x45564153;   // "SAVE"
+constexpr quint32 NVM_CMD_DFLT    = 0x544C4644;   // "DFLT"
+constexpr int     NVM_POLL_MS     = 150;
+constexpr int     NVM_MAX_RETRIES = 10;
+
+// Persistent parameters (uint32 each, offsets after the command word).
+// Only parameters that are deliberately persistent appear here; everything
+// else belongs in the cal block / CAL_PARAMS.
+struct NvmParam { const char *key; const char *name; };
+constexpr NvmParam NVM_PARAMS[] = {
+    {"userValue", "userValue - freies uint32 (Validierung)"},
+};
+constexpr int NVM_VALUES = int(sizeof(NVM_PARAMS) / sizeof(NVM_PARAMS[0]));
 
 // diagStatus bits, must match DIAGNOSTICS.md
 struct DiagBit { int bit; const char *text; };
@@ -42,29 +66,31 @@ constexpr DiagBit DIAG_BITS[] = {
     {9,  "VEXT-Überspannung (5 V Board)"},
     {10, "Temperatursensoren unplausibel (Delta DTS/DTSC)"},
     {11, "UART-Verbindung getrennt (kein Heartbeat vom PC)"},
+    {12, "NVM-Fehler (DFLASH korrupt oder Speichern fehlgeschlagen)"},
     {31, "Kalibrierblock ungültig - Defaults geladen"},
 };
 constexpr int DIAG_ROWS = int(sizeof(DIAG_BITS) / sizeof(DIAG_BITS[0]));
 constexpr int DIAG_TAB_INDEX = 1;   // "Diagnose" position in the sub-tabs
 
-// calibration block layout (offset after magic = index * 4)
-struct CalParam { const char *name; const char *unit; };
+// calibration block layout (offset after magic = index * 4); the key is
+// the stable identifier used for JSON export/import
+struct CalParam { const char *key; const char *name; const char *unit; };
 constexpr CalParam CAL_PARAMS[CAL_VALUES] = {
-    {"dtsMin   - DTS Untergrenze",        "°C"},
-    {"dtsMax   - DTS Obergrenze",         "°C"},
-    {"dtscMin  - DTSC Untergrenze",       "°C"},
-    {"dtscMax  - DTSC Obergrenze",        "°C"},
-    {"vddMin   - VDD Untergrenze",        "V"},
-    {"vddMax   - VDD Obergrenze",         "V"},
-    {"vddp3Min - VDDP3 Untergrenze",      "V"},
-    {"vddp3Max - VDDP3 Obergrenze",       "V"},
-    {"vextMin  - VEXT Untergrenze",       "V"},
-    {"vextMax  - VEXT Obergrenze",        "V"},
-    {"tempDeltaMax - max. Sensor-Delta",  "K"},
-    {"debounceSec  - Entprellzeit",       "s"},
-    {"fsVdd    - ADC-Endwert VDD",        "V"},
-    {"fsVddp3  - ADC-Endwert VDDP3",      "V"},
-    {"fsVext   - ADC-Endwert VEXT",       "V"},
+    {"dtsMin",       "dtsMin   - DTS Untergrenze",        "°C"},
+    {"dtsMax",       "dtsMax   - DTS Obergrenze",         "°C"},
+    {"dtscMin",      "dtscMin  - DTSC Untergrenze",       "°C"},
+    {"dtscMax",      "dtscMax  - DTSC Obergrenze",        "°C"},
+    {"vddMin",       "vddMin   - VDD Untergrenze",        "V"},
+    {"vddMax",       "vddMax   - VDD Obergrenze",         "V"},
+    {"vddp3Min",     "vddp3Min - VDDP3 Untergrenze",      "V"},
+    {"vddp3Max",     "vddp3Max - VDDP3 Obergrenze",       "V"},
+    {"vextMin",      "vextMin  - VEXT Untergrenze",       "V"},
+    {"vextMax",      "vextMax  - VEXT Obergrenze",        "V"},
+    {"tempDeltaMax", "tempDeltaMax - max. Sensor-Delta",  "K"},
+    {"debounceSec",  "debounceSec  - Entprellzeit",       "s"},
+    {"fsVdd",        "fsVdd    - ADC-Endwert VDD",        "V"},
+    {"fsVddp3",      "fsVddp3  - ADC-Endwert VDDP3",      "V"},
+    {"fsVext",       "fsVext   - ADC-Endwert VEXT",       "V"},
 };
 }
 
@@ -94,6 +120,7 @@ XcpPanel::XcpPanel(QWidget *parent)
     m_subTabs->addTab(buildLiveTab(), "Messwerte");
     m_subTabs->addTab(buildDiagTab(), "Diagnose");
     m_subTabs->addTab(buildCalTab(),  "Kalibrierung");
+    m_subTabs->addTab(buildNvmTab(),  "DFLASH");
     m_subTabs->addTab(buildPlotTab(), "Plot && Log");
     updateDiagLamp();
 
@@ -195,8 +222,8 @@ QWidget *XcpPanel::buildDiagTab()
 
 QWidget *XcpPanel::buildCalTab()
 {
-    m_calTable = new QTableWidget(CAL_VALUES, 3);
-    m_calTable->setHorizontalHeaderLabels({"Parameter", "Einheit", "Wert"});
+    m_calTable = new QTableWidget(CAL_VALUES, 4);
+    m_calTable->setHorizontalHeaderLabels({"Parameter", "Einheit", "Wert", ""});
     m_calTable->verticalHeader()->setVisible(false);
     for (int i = 0; i < CAL_VALUES; ++i) {
         auto *name = new QTableWidgetItem(QString::fromUtf8(CAL_PARAMS[i].name));
@@ -206,26 +233,95 @@ QWidget *XcpPanel::buildCalTab()
         m_calTable->setItem(i, 0, name);
         m_calTable->setItem(i, 1, unit);
         m_calTable->setItem(i, 2, new QTableWidgetItem("-"));   // editable
+
+        // one write button per parameter: values go to the board one by
+        // one and deliberately never as a bulk write
+        auto *writeBtn = new QPushButton("Schreiben");
+        writeBtn->setEnabled(false);
+        connect(writeBtn, &QPushButton::clicked, this, [this, i]() { writeCalRow(i); });
+        m_calTable->setCellWidget(i, 3, writeBtn);
+        m_calRowBtns.append(writeBtn);
     }
     m_calTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
 
-    m_calReadBtn  = new QPushButton("Lesen");
-    m_calWriteBtn = new QPushButton("Schreiben");
+    m_calReadBtn   = new QPushButton("Alle lesen");
+    m_calExportBtn = new QPushButton("Exportieren...");
+    m_calImportBtn = new QPushButton("Importieren...");
+    m_calExportBtn->setToolTip("Parametersatz (Tabellenwerte) als JSON-Datei speichern");
+    m_calImportBtn->setToolTip("Parametersatz aus JSON-Datei in die Tabelle laden - "
+                               "geschrieben wird danach einzeln pro Parameter");
     m_calReadBtn->setEnabled(false);
-    m_calWriteBtn->setEnabled(false);
-    connect(m_calReadBtn,  &QPushButton::clicked, this, &XcpPanel::readCalibration);
-    connect(m_calWriteBtn, &QPushButton::clicked, this, &XcpPanel::writeCalibration);
+    connect(m_calReadBtn,   &QPushButton::clicked, this, &XcpPanel::readCalibration);
+    connect(m_calExportBtn, &QPushButton::clicked, this, &XcpPanel::exportCalibration);
+    connect(m_calImportBtn, &QPushButton::clicked, this, &XcpPanel::importCalibration);
 
     auto *btnRow = new QHBoxLayout;
     btnRow->addWidget(m_calReadBtn);
-    btnRow->addWidget(m_calWriteBtn);
     btnRow->addStretch(1);
+    btnRow->addWidget(m_calImportBtn);
+    btnRow->addWidget(m_calExportBtn);
 
     auto *tab    = new QWidget;
     auto *layout = new QVBoxLayout(tab);
     layout->addWidget(m_calTable, 1);
     layout->addLayout(btnRow);
-    layout->addWidget(new QLabel("Werte liegen im RAM - nach einem Reset gelten wieder die Defaults."));
+    layout->addWidget(new QLabel("Arbeitsseite im RAM - nach einem Reset gelten wieder die Defaults. "
+                                 "Persistente Parameter: Tab \"DFLASH\"."));
+    return tab;
+}
+
+QWidget *XcpPanel::buildNvmTab()
+{
+    m_nvmTable = new QTableWidget(NVM_VALUES, 3);
+    m_nvmTable->setHorizontalHeaderLabels({"Parameter", "Wert", ""});
+    m_nvmTable->verticalHeader()->setVisible(false);
+    for (int i = 0; i < NVM_VALUES; ++i) {
+        auto *name = new QTableWidgetItem(QString::fromUtf8(NVM_PARAMS[i].name));
+        name->setFlags(name->flags() & ~Qt::ItemIsEditable);
+        m_nvmTable->setItem(i, 0, name);
+        m_nvmTable->setItem(i, 1, new QTableWidgetItem("-"));   // editable
+
+        auto *writeBtn = new QPushButton("Schreiben");
+        writeBtn->setEnabled(false);
+        connect(writeBtn, &QPushButton::clicked, this, [this, i]() { writeNvmRow(i); });
+        m_nvmTable->setCellWidget(i, 2, writeBtn);
+        m_nvmRowBtns.append(writeBtn);
+    }
+    m_nvmTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+
+    m_nvmReadBtn = new QPushButton("Alle lesen");
+    m_nvmSaveBtn = new QPushButton("Im DFLASH speichern");
+    m_nvmDfltBtn = new QPushButton("Defaults laden");
+    m_nvmSaveBtn->setToolTip("Persistiert den NVM-Block reset-fest im DFLASH (SAVE)");
+    m_nvmDfltBtn->setToolTip("Lädt die NVM-Defaults ins RAM - speichert nicht (DFLT)");
+    m_nvmReadBtn->setEnabled(false);
+    m_nvmSaveBtn->setEnabled(false);
+    m_nvmDfltBtn->setEnabled(false);
+    connect(m_nvmReadBtn, &QPushButton::clicked, this, &XcpPanel::readNvmParams);
+    connect(m_nvmSaveBtn, &QPushButton::clicked, this, &XcpPanel::saveNvmToFlash);
+    connect(m_nvmDfltBtn, &QPushButton::clicked, this, &XcpPanel::loadNvmDefaults);
+
+    m_nvmStatus = new QLabel("-");
+
+    auto *btnRow = new QHBoxLayout;
+    btnRow->addWidget(m_nvmReadBtn);
+    btnRow->addStretch(1);
+    btnRow->addWidget(m_nvmDfltBtn);
+    btnRow->addWidget(m_nvmSaveBtn);
+
+    auto *statusRow = new QHBoxLayout;
+    statusRow->addWidget(new QLabel("Letztes Kommando:"));
+    statusRow->addWidget(m_nvmStatus, 1);
+
+    auto *tab    = new QWidget;
+    auto *layout = new QVBoxLayout(tab);
+    layout->addWidget(new QLabel("Persistente Parameter (Xcp_Nvm @ 0x70030200) - nur dieser Block "
+                                 "wird im DFLASH gespeichert. Hier erscheinen ausschließlich "
+                                 "Parameter, die bewusst persistent angelegt wurden."));
+    layout->addWidget(m_nvmTable, 1);
+    layout->addLayout(btnRow);
+    layout->addLayout(statusRow);
+    layout->addWidget(new QLabel("Speicherstatus siehe Diagnose-Bit 12 (NVM-Fehler)."));
     return tab;
 }
 
@@ -477,8 +573,101 @@ void XcpPanel::readCalibration()
     m_client->readMemory(XCP_CAL_ADDR + 4, CAL_VALUES * 4);
 }
 
+// ---- NVM command handshake -------------------------------------------
+// Write SAVE/DFLT into the command word, then poll it until the firmware
+// clears it (executed) or the retries run out.
+
+void XcpPanel::saveNvmToFlash()
+{
+    sendNvmCommand(NVM_CMD_SAVE, "SAVE");
+}
+
+void XcpPanel::loadNvmDefaults()
+{
+    sendNvmCommand(NVM_CMD_DFLT, "DFLT");
+}
+
+void XcpPanel::sendNvmCommand(quint32 cmd, const QString &name)
+{
+    if (!m_nvmCmdName.isEmpty())
+        return;                     // one command at a time
+
+    m_nvmCmdName = name;
+    m_nvmRetries = NVM_MAX_RETRIES;
+    setNvmBusy(true);
+
+    QByteArray word(4, '\0');
+    qToLittleEndian<quint32>(cmd, word.data());
+    m_client->writeMemory(NVM_CMD_ADDR, word);
+    m_nvmStatus->setText(name + " läuft...");
+    m_log->appendPlainText("[NVM: " + name + " gesendet]");
+}
+
+void XcpPanel::pollNvmCommand()
+{
+    m_client->readMemory(NVM_CMD_ADDR, 4);
+}
+
+void XcpPanel::setNvmBusy(bool busy)
+{
+    const bool enable = m_client->isConnected() && !busy;
+    m_nvmSaveBtn->setEnabled(enable);
+    m_nvmDfltBtn->setEnabled(enable);
+}
+
+void XcpPanel::readNvmParams()
+{
+    m_client->readMemory(NVM_PARAM_ADDR, quint8(NVM_VALUES * 4));
+}
+
+void XcpPanel::writeNvmRow(int row)
+{
+    bool          ok    = false;
+    const QString text  = m_nvmTable->item(row, 1)->text().trimmed();
+    const quint32 value = text.toUInt(&ok, 0);   // base 0: "123" or "0x7B"
+    if (!ok) {
+        m_log->appendPlainText(QString("[Ungültiger Wert für %1 - Abbruch]")
+                               .arg(QString::fromUtf8(NVM_PARAMS[row].key)));
+        return;
+    }
+
+    QByteArray word(4, '\0');
+    qToLittleEndian<quint32>(value, word.data());
+    m_client->writeMemory(NVM_PARAM_ADDR + quint32(row) * 4, word);
+}
+
 void XcpPanel::onMemoryRead(quint32 address, const QByteArray &data)
 {
+    if (address == NVM_CMD_ADDR && data.size() >= 4 && !m_nvmCmdName.isEmpty()) {
+        const quint32 word = qFromLittleEndian<quint32>(data.constData());
+        if (word == 0) {
+            m_log->appendPlainText("[NVM: " + m_nvmCmdName
+                                   + " ausgeführt - Status siehe Diagnose-Bit 12]");
+            m_nvmStatus->setText(m_nvmCmdName + " ausgeführt");
+            m_nvmCmdName.clear();
+            setNvmBusy(false);
+            readNvmParams();    // DFLT changes values; after SAVE a no-op refresh
+        } else if (--m_nvmRetries > 0) {
+            QTimer::singleShot(NVM_POLL_MS, this, &XcpPanel::pollNvmCommand);
+        } else {
+            m_log->appendPlainText("[NVM: " + m_nvmCmdName
+                                   + " nicht bestätigt - Firmware < v1.6.0?]");
+            m_nvmStatus->setText(m_nvmCmdName + " nicht bestätigt");
+            m_nvmCmdName.clear();
+            setNvmBusy(false);
+        }
+        return;
+    }
+
+    if (address == NVM_PARAM_ADDR && data.size() >= NVM_VALUES * 4) {
+        for (int i = 0; i < NVM_VALUES; ++i) {
+            const quint32 v = qFromLittleEndian<quint32>(data.constData() + i * 4);
+            m_nvmTable->item(i, 1)->setText(QString::number(v));
+        }
+        m_log->appendPlainText("[NVM-Parameter gelesen]");
+        return;
+    }
+
     if (address != XCP_CAL_ADDR + 4 || data.size() < CAL_VALUES * 4)
         return;
 
@@ -490,30 +679,105 @@ void XcpPanel::onMemoryRead(quint32 address, const QByteArray &data)
     m_log->appendPlainText("[Kalibrierwerte gelesen]");
 }
 
-void XcpPanel::writeCalibration()
+void XcpPanel::writeCalRow(int row)
 {
-    QByteArray block(CAL_VALUES * 4, '\0');
-    for (int i = 0; i < CAL_VALUES; ++i) {
-        bool  ok = false;
-        float f  = m_calTable->item(i, 2)->text().replace(',', '.').toFloat(&ok);
-        if (!ok) {
-            m_log->appendPlainText(QString("[Ungültiger Wert in Zeile %1 - Abbruch]").arg(i + 1));
-            return;
-        }
-        std::memcpy(block.data() + i * 4, &f, sizeof(f));
+    bool  ok = false;
+    float f  = m_calTable->item(row, 2)->text().replace(',', '.').toFloat(&ok);
+    if (!ok) {
+        m_log->appendPlainText(QString("[Ungültiger Wert für %1 - Abbruch]")
+                               .arg(QString::fromUtf8(CAL_PARAMS[row].key)));
+        return;
     }
 
-    // SHORT_DOWNLOAD payload is limited to 56 bytes -> two chunks
-    m_calWritesPending = 2;
-    m_client->writeMemory(XCP_CAL_ADDR + 4,      block.left(40));
-    m_client->writeMemory(XCP_CAL_ADDR + 4 + 40, block.mid(40));
+    QByteArray word(4, '\0');
+    std::memcpy(word.data(), &f, sizeof(f));
+    m_client->writeMemory(XCP_CAL_ADDR + 4 + quint32(row) * 4, word);
+}
+
+void XcpPanel::exportCalibration()
+{
+    const QString path = QFileDialog::getSaveFileName(
+        this, "Parametersatz exportieren", "kalibrierung.json", "JSON (*.json)");
+    if (path.isEmpty())
+        return;
+
+    QJsonObject obj;
+    for (int i = 0; i < CAL_VALUES; ++i) {
+        bool  ok = false;
+        const double v = m_calTable->item(i, 2)->text().replace(',', '.').toDouble(&ok);
+        if (!ok) {
+            m_log->appendPlainText(QString("[Export abgebrochen: ungültiger Wert für %1]")
+                                   .arg(QString::fromUtf8(CAL_PARAMS[i].key)));
+            return;
+        }
+        obj.insert(QString::fromUtf8(CAL_PARAMS[i].key), v);
+    }
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        m_log->appendPlainText("[Export fehlgeschlagen: " + file.errorString() + "]");
+        return;
+    }
+    file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+    m_log->appendPlainText("[Parametersatz exportiert: " + path + "]");
+}
+
+void XcpPanel::importCalibration()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, "Parametersatz importieren", QString(), "JSON (*.json)");
+    if (path.isEmpty())
+        return;
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        m_log->appendPlainText("[Import fehlgeschlagen: " + file.errorString() + "]");
+        return;
+    }
+
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+        m_log->appendPlainText("[Import fehlgeschlagen: kein gültiges JSON-Objekt]");
+        return;
+    }
+
+    const QJsonObject obj = doc.object();
+    int applied = 0;
+    for (int i = 0; i < CAL_VALUES; ++i) {
+        const QString key = QString::fromUtf8(CAL_PARAMS[i].key);
+        if (obj.contains(key) && obj.value(key).isDouble()) {
+            m_calTable->item(i, 2)->setText(
+                QString::number(obj.value(key).toDouble(), 'g', 6));
+            ++applied;
+        }
+    }
+    m_log->appendPlainText(QString("[Parametersatz importiert: %1 von %2 Werten - "
+                                   "zum Übernehmen einzeln schreiben]")
+                           .arg(applied).arg(CAL_VALUES));
 }
 
 void XcpPanel::onMemoryWritten(quint32 address)
 {
-    Q_UNUSED(address);
-    if (m_calWritesPending > 0 && --m_calWritesPending == 0) {
-        m_log->appendPlainText("[Kalibrierwerte geschrieben]");
+    if (address == NVM_CMD_ADDR) {
+        // command word landed on the board; give the 100 ms task one cycle
+        QTimer::singleShot(NVM_POLL_MS, this, &XcpPanel::pollNvmCommand);
+        return;
+    }
+
+    if (address >= NVM_PARAM_ADDR && address < NVM_PARAM_ADDR + quint32(NVM_VALUES) * 4) {
+        const int row = int((address - NVM_PARAM_ADDR) / 4);
+        m_log->appendPlainText(QString("[%1 geschrieben - \"Im DFLASH speichern\" "
+                                       "nicht vergessen]")
+                               .arg(QString::fromUtf8(NVM_PARAMS[row].key)));
+        readNvmParams();        // read back for confirmation
+        return;
+    }
+
+    if (address >= XCP_CAL_ADDR + 4 && address < XCP_CAL_ADDR + 4 + quint32(CAL_VALUES) * 4) {
+        const int row = int((address - (XCP_CAL_ADDR + 4)) / 4);
+        m_log->appendPlainText(QString("[%1 geschrieben]")
+                               .arg(QString::fromUtf8(CAL_PARAMS[row].key)));
         readCalibration();      // read back for confirmation
     }
 }
@@ -542,7 +806,17 @@ void XcpPanel::setConnectedState(bool connected)
     m_hostEdit->setEnabled(!connected);
     m_portBox->setEnabled(!connected);
     m_calReadBtn->setEnabled(connected);
-    m_calWriteBtn->setEnabled(connected);
+    for (QPushButton *btn : m_calRowBtns)
+        btn->setEnabled(connected);
+    m_nvmReadBtn->setEnabled(connected);
+    m_nvmSaveBtn->setEnabled(connected);
+    m_nvmDfltBtn->setEnabled(connected);
+    for (QPushButton *btn : m_nvmRowBtns)
+        btn->setEnabled(connected);
+    if (!connected) {
+        m_nvmCmdName.clear();   // abandon a pending NVM handshake
+        m_nvmStatus->setText("-");
+    }
 
     if (!connected && m_logging)
         stopLogging();
