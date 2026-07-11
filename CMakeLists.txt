@@ -22,6 +22,8 @@ add_executable(SerialMonitor
     xcpclient.h
     xcppanel.cpp
     xcppanel.h
+    a2lmodel.cpp
+    a2lmodel.h
     plotwidget.cpp
     plotwidget.h
     mf4writer.cpp

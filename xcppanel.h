@@ -3,8 +3,10 @@
 
 #include <QWidget>
 #include <QElapsedTimer>
+#include <QVector>
 #include "xcpclient.h"
 #include "mf4writer.h"
+#include "a2lmodel.h"
 
 class QLineEdit;
 class QSpinBox;
@@ -42,6 +44,7 @@ private slots:
     void readCalibration();
     void exportCalibration();
     void importCalibration();
+    void loadA2lFile();
     void readNvmParams();
     void saveNvmToFlash();
     void loadNvmDefaults();
@@ -92,8 +95,18 @@ private:
     quint32         m_lastStatus  = 0;
     bool            m_haveStatus  = false;
 
-    // calibration tab (RAM working page: individual writes, global read)
+    // calibration tab (RAM working page: individual writes, global read).
+    // Rows are built from the A2L CHARACTERISTIC list (NVM block excluded);
+    // row index == index into m_chars.
     void            writeCalRow(int row);
+    void            loadA2l(const QString &path, bool remember);
+    void            rebuildCalTable();
+    bool            populateCharsFromRead(quint32 base, const QByteArray &data);
+    QString         defaultA2lPath() const;
+    QVector<A2lChar> m_chars;
+    QString         m_a2lPath;
+    QLabel         *m_a2lStatus    = nullptr;
+    QPushButton    *m_a2lLoadBtn   = nullptr;
     QTableWidget   *m_calTable     = nullptr;
     QPushButton    *m_calReadBtn   = nullptr;
     QPushButton    *m_calExportBtn = nullptr;

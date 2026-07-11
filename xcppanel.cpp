@@ -21,13 +21,16 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFile>
+#include <QFileInfo>
+#include <QDir>
+#include <QSet>
+#include <QSettings>
+#include <QCoreApplication>
 #include <cstring>
 
 namespace {
 // Fixed addresses, see Measurements.h / Diagnostics.h in the firmware.
 constexpr quint32 XCP_DATA_ADDR = 0x70030000;
-constexpr quint32 XCP_CAL_ADDR  = 0x70030100;
-constexpr int     CAL_VALUES    = 15;   // floats after the magic word
 constexpr int     POLL_MS       = 100;  // 10 Hz
 
 // Persistent parameter block Xcp_Nvm (firmware >= v1.6.0), strictly
@@ -44,7 +47,7 @@ constexpr int     NVM_MAX_RETRIES = 10;
 
 // Persistent parameters (uint32 each, offsets after the command word).
 // Only parameters that are deliberately persistent appear here; everything
-// else belongs in the cal block / CAL_PARAMS.
+// else belongs in the RAM cal block (A2L-driven "Calibration" tab).
 struct NvmParam { const char *key; const char *name; };
 constexpr NvmParam NVM_PARAMS[] = {
     {"userValue", "userValue - free uint32 (validation)"},
@@ -72,26 +75,56 @@ constexpr DiagBit DIAG_BITS[] = {
 constexpr int DIAG_ROWS = int(sizeof(DIAG_BITS) / sizeof(DIAG_BITS[0]));
 constexpr int DIAG_TAB_INDEX = 1;   // "Diagnostics" position in the sub-tabs
 
-// calibration block layout (offset after magic = index * 4); the key is
-// the stable identifier used for JSON export/import
-struct CalParam { const char *key; const char *name; const char *unit; };
-constexpr CalParam CAL_PARAMS[CAL_VALUES] = {
-    {"dtsMin",       "dtsMin   - DTS lower limit",        "°C"},
-    {"dtsMax",       "dtsMax   - DTS upper limit",        "°C"},
-    {"dtscMin",      "dtscMin  - DTSC lower limit",       "°C"},
-    {"dtscMax",      "dtscMax  - DTSC upper limit",       "°C"},
-    {"vddMin",       "vddMin   - VDD lower limit",        "V"},
-    {"vddMax",       "vddMax   - VDD upper limit",        "V"},
-    {"vddp3Min",     "vddp3Min - VDDP3 lower limit",      "V"},
-    {"vddp3Max",     "vddp3Max - VDDP3 upper limit",      "V"},
-    {"vextMin",      "vextMin  - VEXT lower limit",       "V"},
-    {"vextMax",      "vextMax  - VEXT upper limit",       "V"},
-    {"tempDeltaMax", "tempDeltaMax - max sensor delta",   "K"},
-    {"debounceSec",  "debounceSec  - debounce time",      "s"},
-    {"fsVdd",        "fsVdd    - ADC full scale VDD",     "V"},
-    {"fsVddp3",      "fsVddp3  - ADC full scale VDDP3",   "V"},
-    {"fsVext",       "fsVext   - ADC full scale VEXT",    "V"},
-};
+// The calibration table is now built from the A2L CHARACTERISTIC list
+// (see A2lModel). These helpers decode/encode a cell value per record type.
+
+QString formatCharValue(const A2lChar &c, const uchar *p)
+{
+    switch (c.type) {
+    case A2lType::Float32: {
+        float f;
+        std::memcpy(&f, p, sizeof(f));
+        return QString::number(double(f), 'g', 6);
+    }
+    case A2lType::Uint32:
+        return QString::number(qFromLittleEndian<quint32>(p));
+    case A2lType::Uint8:
+        return QString::number(uint(p[0]));
+    }
+    return QStringLiteral("-");
+}
+
+QByteArray encodeCharValue(const A2lChar &c, const QString &text, bool *ok)
+{
+    QByteArray out;
+    *ok = false;
+    const QString s = text.trimmed();
+    switch (c.type) {
+    case A2lType::Float32: {
+        const float f = QString(s).replace(',', '.').toFloat(ok);
+        if (!*ok) break;
+        out.resize(4);
+        std::memcpy(out.data(), &f, sizeof(f));
+        break;
+    }
+    case A2lType::Uint32: {
+        const quint32 v = s.toUInt(ok, 0);   // base 0: "12" or "0x0C"
+        if (!*ok) break;
+        out.resize(4);
+        qToLittleEndian<quint32>(v, out.data());
+        break;
+    }
+    case A2lType::Uint8: {
+        const uint v = s.toUInt(ok, 0);
+        if (*ok && v > 255u) *ok = false;
+        if (!*ok) break;
+        out.resize(1);
+        out[0] = char(uchar(v));
+        break;
+    }
+    }
+    return out;
+}
 }
 
 XcpPanel::XcpPanel(QWidget *parent)
@@ -115,6 +148,11 @@ XcpPanel::XcpPanel(QWidget *parent)
     topRow->addWidget(m_connectBtn);
     topRow->addWidget(new QLabel("Board:"));
     topRow->addWidget(m_identLbl);
+
+    // Load the firmware's A2L up front so the Calibration tab is built from
+    // it. Widgets do not exist yet, so loadA2l only fills m_chars here; the
+    // table + status label are populated when buildCalTab() runs below.
+    loadA2l(defaultA2lPath(), /*remember=*/false);
 
     m_subTabs = new QTabWidget;
     m_subTabs->addTab(buildLiveTab(), "Live Data");
@@ -226,52 +264,149 @@ QWidget *XcpPanel::buildDiagTab()
 
 QWidget *XcpPanel::buildCalTab()
 {
-    m_calTable = new QTableWidget(CAL_VALUES, 4);
+    m_calTable = new QTableWidget(0, 4);
     m_calTable->setHorizontalHeaderLabels({"Parameter", "Unit", "Value", ""});
     m_calTable->verticalHeader()->setVisible(false);
-    for (int i = 0; i < CAL_VALUES; ++i) {
-        auto *name = new QTableWidgetItem(QString::fromUtf8(CAL_PARAMS[i].name));
-        name->setFlags(name->flags() & ~Qt::ItemIsEditable);
-        auto *unit = new QTableWidgetItem(QString::fromUtf8(CAL_PARAMS[i].unit));
-        unit->setFlags(unit->flags() & ~Qt::ItemIsEditable);
-        m_calTable->setItem(i, 0, name);
-        m_calTable->setItem(i, 1, unit);
-        m_calTable->setItem(i, 2, new QTableWidgetItem("-"));   // editable
-
-        // one write button per parameter: values go to the board one by
-        // one and deliberately never as a bulk write
-        auto *writeBtn = new QPushButton("Write");
-        writeBtn->setEnabled(false);
-        connect(writeBtn, &QPushButton::clicked, this, [this, i]() { writeCalRow(i); });
-        m_calTable->setCellWidget(i, 3, writeBtn);
-        m_calRowBtns.append(writeBtn);
-    }
     m_calTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
 
     m_calReadBtn   = new QPushButton("Read all");
     m_calExportBtn = new QPushButton("Export...");
     m_calImportBtn = new QPushButton("Import...");
+    m_a2lLoadBtn   = new QPushButton("Load A2L...");
     m_calExportBtn->setToolTip("Save the parameter set (table values) to a JSON file");
     m_calImportBtn->setToolTip("Load a parameter set from a JSON file into the table - "
                                "values are then written individually per parameter");
+    m_a2lLoadBtn->setToolTip("Load a different A2L file; the table is rebuilt from its "
+                             "CHARACTERISTIC list");
     m_calReadBtn->setEnabled(false);
     connect(m_calReadBtn,   &QPushButton::clicked, this, &XcpPanel::readCalibration);
     connect(m_calExportBtn, &QPushButton::clicked, this, &XcpPanel::exportCalibration);
     connect(m_calImportBtn, &QPushButton::clicked, this, &XcpPanel::importCalibration);
+    connect(m_a2lLoadBtn,   &QPushButton::clicked, this, &XcpPanel::loadA2lFile);
+
+    m_a2lStatus = new QLabel("-");
 
     auto *btnRow = new QHBoxLayout;
     btnRow->addWidget(m_calReadBtn);
+    btnRow->addWidget(m_a2lLoadBtn);
     btnRow->addStretch(1);
     btnRow->addWidget(m_calImportBtn);
     btnRow->addWidget(m_calExportBtn);
 
     auto *tab    = new QWidget;
     auto *layout = new QVBoxLayout(tab);
+    layout->addWidget(m_a2lStatus);
     layout->addWidget(m_calTable, 1);
     layout->addLayout(btnRow);
-    layout->addWidget(new QLabel("RAM working page - defaults apply again after a reset. "
+    layout->addWidget(new QLabel("Rows come from the A2L (CHARACTERISTIC list). "
+                                 "RAM working page - defaults apply again after a reset. "
                                  "Persistent parameters: \"DFLASH\" tab."));
+
+    rebuildCalTable();      // fills the table from m_chars loaded in the ctor
     return tab;
+}
+
+// (Re)build the calibration rows from the parsed A2L characteristics. Row i
+// maps to m_chars[i], so read/write need no extra lookup table.
+void XcpPanel::rebuildCalTable()
+{
+    if (!m_calTable)
+        return;
+
+    m_calTable->setRowCount(0);     // drops old items and cell widgets
+    m_calRowBtns.clear();
+    m_calTable->setRowCount(m_chars.size());
+
+    const bool connected = m_client->isConnected();
+    for (int i = 0; i < m_chars.size(); ++i) {
+        const A2lChar &c = m_chars[i];
+
+        auto *name = new QTableWidgetItem(c.name);
+        name->setFlags(name->flags() & ~Qt::ItemIsEditable);
+        if (!c.desc.isEmpty())
+            name->setToolTip(c.desc);
+        auto *unit = new QTableWidgetItem(c.unit);
+        unit->setFlags(unit->flags() & ~Qt::ItemIsEditable);
+        m_calTable->setItem(i, 0, name);
+        m_calTable->setItem(i, 1, unit);
+        m_calTable->setItem(i, 2, new QTableWidgetItem("-"));   // editable
+
+        auto *writeBtn = new QPushButton("Write");
+        writeBtn->setEnabled(connected);
+        connect(writeBtn, &QPushButton::clicked, this, [this, i]() { writeCalRow(i); });
+        m_calTable->setCellWidget(i, 3, writeBtn);
+        m_calRowBtns.append(writeBtn);
+    }
+
+    if (m_a2lStatus) {
+        if (m_chars.isEmpty())
+            m_a2lStatus->setText("No A2L loaded - use \"Load A2L...\"");
+        else
+            m_a2lStatus->setText(QString("Loaded %1 characteristics from %2")
+                                     .arg(m_chars.size())
+                                     .arg(QDir::toNativeSeparators(m_a2lPath)));
+    }
+}
+
+// Candidate A2L: last one used (QSettings), else the sibling firmware repo.
+QString XcpPanel::defaultA2lPath() const
+{
+    QSettings settings;
+    const QString saved = settings.value("a2lPath").toString();
+    if (!saved.isEmpty() && QFile::exists(saved))
+        return saved;
+
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList candidates = {
+        appDir + "/../../AurixTricore/docs/AurixTricore.a2l",   // exe in build/
+        appDir + "/../AurixTricore/docs/AurixTricore.a2l",
+        appDir + "/AurixTricore.a2l",
+    };
+    for (const QString &c : candidates) {
+        if (QFile::exists(c))
+            return QFileInfo(c).absoluteFilePath();
+    }
+    return saved;                   // may be empty -> "No A2L loaded"
+}
+
+void XcpPanel::loadA2l(const QString &path, bool remember)
+{
+    QString err;
+    const QVector<A2lChar> parsed = A2lModel::parseFile(path, &err);
+    if (parsed.isEmpty()) {
+        if (m_log)
+            m_log->appendPlainText("[A2L load failed: " + err + " (" + path + ")]");
+        if (m_a2lStatus && m_chars.isEmpty())
+            m_a2lStatus->setText("No A2L loaded - " + err);
+        return;                     // keep any previously loaded characteristics
+    }
+
+    // The persistent NVM block keeps its own DFLASH tab, so drop it here.
+    m_chars.clear();
+    for (const A2lChar &c : parsed) {
+        if (c.addr >= XCP_NVM_ADDR && c.addr < XCP_NVM_ADDR + 0x100u)
+            continue;
+        m_chars.append(c);
+    }
+    m_a2lPath = path;
+
+    if (remember) {
+        QSettings settings;
+        settings.setValue("a2lPath", path);
+    }
+    if (m_log)
+        m_log->appendPlainText(QString("[A2L loaded: %1 characteristics from %2]")
+                                   .arg(m_chars.size()).arg(path));
+    rebuildCalTable();
+}
+
+void XcpPanel::loadA2lFile()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, "Load A2L description", m_a2lPath, "A2L (*.a2l);;All files (*)");
+    if (path.isEmpty())
+        return;
+    loadA2l(path, /*remember=*/true);
 }
 
 QWidget *XcpPanel::buildNvmTab()
@@ -573,8 +708,31 @@ void XcpPanel::updateDiagLamp()
 
 void XcpPanel::readCalibration()
 {
-    // 15 floats after the magic word (60 bytes, fits one SHORT_UPLOAD)
-    m_client->readMemory(XCP_CAL_ADDR + 4, CAL_VALUES * 4);
+    if (m_chars.isEmpty())
+        return;
+
+    // Group characteristics by their 0x100 block and issue one read per block
+    // (each block spans <= ~60 bytes, well within a single SHORT_UPLOAD).
+    QSet<quint32> bases;
+    for (const A2lChar &c : m_chars)
+        bases.insert(c.addr & 0xFFFFFF00u);
+
+    for (quint32 base : bases) {
+        quint32 lo = 0xFFFFFFFFu;
+        quint32 hi = 0;
+        for (const A2lChar &c : m_chars) {
+            if ((c.addr & 0xFFFFFF00u) != base)
+                continue;
+            lo = qMin(lo, c.addr);
+            hi = qMax(hi, c.addr + quint32(a2lTypeSize(c.type)));
+        }
+        if (hi > lo) {
+            quint32 span = hi - lo;
+            if (span > 63u)
+                span = 63u;         // SHORT_UPLOAD payload cap
+            m_client->readMemory(lo, quint8(span));
+        }
+    }
 }
 
 // ---- NVM command handshake -------------------------------------------
@@ -672,30 +830,47 @@ void XcpPanel::onMemoryRead(quint32 address, const QByteArray &data)
         return;
     }
 
-    if (address != XCP_CAL_ADDR + 4 || data.size() < CAL_VALUES * 4)
-        return;
+    // A2L characteristic block read-back: fill any row whose value lies
+    // inside the returned window (cal floats and GPIO bytes alike).
+    populateCharsFromRead(address, data);
+}
 
-    for (int i = 0; i < CAL_VALUES; ++i) {
-        float f = 0.0f;
-        std::memcpy(&f, data.constData() + i * 4, sizeof(f));
-        m_calTable->item(i, 2)->setText(QString::number(double(f), 'g', 6));
+// Populate value cells for every characteristic contained in [base, base+len).
+// Returns true if at least one cell was updated.
+bool XcpPanel::populateCharsFromRead(quint32 base, const QByteArray &data)
+{
+    bool any = false;
+    for (int i = 0; i < m_chars.size(); ++i) {
+        const A2lChar &c = m_chars[i];
+        if (c.addr < base)
+            continue;
+        const int off = int(c.addr - base);
+        if (off + a2lTypeSize(c.type) > data.size())
+            continue;
+        const uchar *p = reinterpret_cast<const uchar *>(data.constData()) + off;
+        if (m_calTable->item(i, 2))
+            m_calTable->item(i, 2)->setText(formatCharValue(c, p));
+        any = true;
     }
-    m_log->appendPlainText("[Calibration values read]");
+    if (any)
+        m_log->appendPlainText("[Calibration/GPIO values read]");
+    return any;
 }
 
 void XcpPanel::writeCalRow(int row)
 {
-    bool  ok = false;
-    float f  = m_calTable->item(row, 2)->text().replace(',', '.').toFloat(&ok);
+    if (row < 0 || row >= m_chars.size())
+        return;
+
+    const A2lChar &c = m_chars[row];
+    bool ok = false;
+    const QByteArray bytes = encodeCharValue(c, m_calTable->item(row, 2)->text(), &ok);
     if (!ok) {
-        m_log->appendPlainText(QString("[Invalid value for %1 - aborted]")
-                               .arg(QString::fromUtf8(CAL_PARAMS[row].key)));
+        m_log->appendPlainText(QString("[Invalid value for %1 - aborted]").arg(c.name));
         return;
     }
 
-    QByteArray word(4, '\0');
-    std::memcpy(word.data(), &f, sizeof(f));
-    m_client->writeMemory(XCP_CAL_ADDR + 4 + quint32(row) * 4, word);
+    m_client->writeMemory(c.addr, bytes);
 }
 
 void XcpPanel::exportCalibration()
@@ -706,15 +881,15 @@ void XcpPanel::exportCalibration()
         return;
 
     QJsonObject obj;
-    for (int i = 0; i < CAL_VALUES; ++i) {
+    for (int i = 0; i < m_chars.size(); ++i) {
         bool  ok = false;
         const double v = m_calTable->item(i, 2)->text().replace(',', '.').toDouble(&ok);
         if (!ok) {
             m_log->appendPlainText(QString("[Export aborted: invalid value for %1]")
-                                   .arg(QString::fromUtf8(CAL_PARAMS[i].key)));
+                                   .arg(m_chars[i].name));
             return;
         }
-        obj.insert(QString::fromUtf8(CAL_PARAMS[i].key), v);
+        obj.insert(m_chars[i].name, v);
     }
 
     QFile file(path);
@@ -748,17 +923,20 @@ void XcpPanel::importCalibration()
 
     const QJsonObject obj = doc.object();
     int applied = 0;
-    for (int i = 0; i < CAL_VALUES; ++i) {
-        const QString key = QString::fromUtf8(CAL_PARAMS[i].key);
-        if (obj.contains(key) && obj.value(key).isDouble()) {
-            m_calTable->item(i, 2)->setText(
-                QString::number(obj.value(key).toDouble(), 'g', 6));
+    for (int i = 0; i < m_chars.size(); ++i) {
+        const A2lChar &c = m_chars[i];
+        if (obj.contains(c.name) && obj.value(c.name).isDouble()) {
+            const double d = obj.value(c.name).toDouble();
+            const QString s = (c.type == A2lType::Float32)
+                                  ? QString::number(d, 'g', 6)
+                                  : QString::number(qint64(d));
+            m_calTable->item(i, 2)->setText(s);
             ++applied;
         }
     }
     m_log->appendPlainText(QString("[Parameter set imported: %1 of %2 values - "
                                    "write them individually to apply]")
-                           .arg(applied).arg(CAL_VALUES));
+                           .arg(applied).arg(m_chars.size()));
 }
 
 void XcpPanel::onMemoryWritten(quint32 address)
@@ -777,11 +955,12 @@ void XcpPanel::onMemoryWritten(quint32 address)
         return;
     }
 
-    if (address >= XCP_CAL_ADDR + 4 && address < XCP_CAL_ADDR + 4 + quint32(CAL_VALUES) * 4) {
-        const int row = int((address - (XCP_CAL_ADDR + 4)) / 4);
-        m_log->appendPlainText(QString("[%1 written]")
-                               .arg(QString::fromUtf8(CAL_PARAMS[row].key)));
-        readCalibration();      // read back for confirmation
+    for (const A2lChar &c : m_chars) {
+        if (address == c.addr) {
+            m_log->appendPlainText(QString("[%1 written]").arg(c.name));
+            readCalibration();      // read back for confirmation
+            return;
+        }
     }
 }
 

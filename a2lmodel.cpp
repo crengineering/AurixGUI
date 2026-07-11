@@ -1,0 +1,148 @@
+#include "a2lmodel.h"
+
+#include <QFile>
+#include <QHash>
+
+namespace {
+
+// Remove /* ... */ block comments (A2L uses only these). Each comment is
+// replaced by a space so it cannot glue two tokens together.
+QString stripBlockComments(const QString &in)
+{
+    QString out;
+    out.reserve(in.size());
+    int i = 0;
+    const int n = in.size();
+    while (i < n) {
+        if (i + 1 < n && in[i] == '/' && in[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(in[i] == '*' && in[i + 1] == '/'))
+                ++i;
+            i += 2;                 // skip the closing */
+            out += QLatin1Char(' ');
+        } else {
+            out += in[i];
+            ++i;
+        }
+    }
+    return out;
+}
+
+// Split into whitespace-separated tokens; a "quoted string" becomes one token
+// with the quotes stripped, so descriptions with spaces stay intact and can
+// never be confused with keywords like VALUE.
+QVector<QString> tokenize(const QString &text)
+{
+    QVector<QString> toks;
+    int i = 0;
+    const int n = text.size();
+    while (i < n) {
+        const QChar c = text[i];
+        if (c.isSpace()) {
+            ++i;
+        } else if (c == QLatin1Char('"')) {
+            ++i;
+            QString s;
+            while (i < n && text[i] != QLatin1Char('"')) {
+                s += text[i];
+                ++i;
+            }
+            ++i;                    // skip closing quote
+            toks.append(s);
+        } else {
+            QString s;
+            while (i < n && !text[i].isSpace()) {
+                s += text[i];
+                ++i;
+            }
+            toks.append(s);
+        }
+    }
+    return toks;
+}
+
+bool mapBaseType(const QString &bt, A2lType *out)
+{
+    if (bt == QLatin1String("FLOAT32_IEEE")) { *out = A2lType::Float32; return true; }
+    if (bt == QLatin1String("ULONG"))        { *out = A2lType::Uint32;  return true; }
+    if (bt == QLatin1String("UBYTE"))        { *out = A2lType::Uint8;   return true; }
+    return false;                   // other base types are not needed here
+}
+
+} // namespace
+
+QVector<A2lChar> A2lModel::parseFile(const QString &path, QString *err)
+{
+    QVector<A2lChar> out;
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        if (err) *err = f.errorString();
+        return out;
+    }
+
+    const QString text = stripBlockComments(QString::fromUtf8(f.readAll()));
+    const QVector<QString> t = tokenize(text);
+
+    // Pass 1: RECORD_LAYOUT name -> base type (from its FNC_VALUES entry).
+    QHash<QString, A2lType> layouts;
+    for (int i = 0; i + 2 < t.size(); ++i) {
+        if (t[i] == QLatin1String("/begin") &&
+            t[i + 1] == QLatin1String("RECORD_LAYOUT")) {
+            const QString name = t[i + 2];
+            for (int j = i + 3; j < t.size(); ++j) {
+                if (t[j] == QLatin1String("/end"))
+                    break;
+                if (t[j] == QLatin1String("FNC_VALUES") && j + 2 < t.size()) {
+                    A2lType ty;
+                    if (mapBaseType(t[j + 2], &ty))
+                        layouts.insert(name, ty);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Pass 2: each CHARACTERISTIC block -> one A2lChar (if we know its layout).
+    for (int i = 0; i + 3 < t.size(); ++i) {
+        if (t[i] != QLatin1String("/begin") ||
+            t[i + 1] != QLatin1String("CHARACTERISTIC"))
+            continue;
+
+        A2lChar c;
+        c.name = t[i + 2];
+        c.desc = t[i + 3];
+        QString layoutName;
+        bool haveValue = false;
+
+        int depth = 1;
+        int j = i + 4;
+        for (; j < t.size() && depth > 0; ++j) {
+            const QString &tok = t[j];
+            if (tok == QLatin1String("/begin")) { ++depth; continue; }
+            if (tok == QLatin1String("/end"))   { --depth; continue; }
+            if (depth != 1)
+                continue;
+            // VALUE <addr> <recordLayout> <maxDiff> <conv> <lo> <hi>
+            if (tok == QLatin1String("VALUE") && !haveValue && j + 6 < t.size()) {
+                c.addr     = t[j + 1].toUInt(nullptr, 0);
+                layoutName = t[j + 2];
+                c.lo       = t[j + 5].toDouble();
+                c.hi       = t[j + 6].toDouble();
+                haveValue  = true;
+            } else if (tok == QLatin1String("PHYS_UNIT") && j + 1 < t.size()) {
+                c.unit = t[j + 1];
+            }
+        }
+
+        if (haveValue && layouts.contains(layoutName)) {
+            c.type = layouts.value(layoutName);
+            out.append(c);
+        }
+        i = j - 1;                  // resume after this block
+    }
+
+    if (out.isEmpty() && err && err->isEmpty())
+        *err = QStringLiteral("no CHARACTERISTIC entries found");
+    return out;
+}
