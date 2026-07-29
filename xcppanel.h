@@ -64,6 +64,7 @@ private:
     void     setConnectedState(bool connected);
     void     updateDiagTable(quint32 status);
     void     updateLogStatus();
+    bool     chooseLogChannels(QVector<int> *out);   // pre-log channel picker
 
     void     updateDiagLamp();
 
@@ -85,6 +86,9 @@ private:
     QLabel         *m_vddLbl     = nullptr;
     QLabel         *m_vddp3Lbl   = nullptr;
     QLabel         *m_vextLbl    = nullptr;
+    QLabel         *m_baroPressLbl = nullptr;   // BMP388 pressure
+    QLabel         *m_baroTempLbl  = nullptr;   // BMP388 temperature
+    QLabel         *m_baroAltLbl   = nullptr;   // pressure altitude
     QPlainTextEdit *m_log        = nullptr;
 
     // diagnostics tab
@@ -128,13 +132,14 @@ private:
 
     // plot & logging tab
     PlotWidget     *m_plot        = nullptr;
-    QCheckBox      *m_plotChk[5]  = {};
-    int             m_series[5]   = {};
+    QCheckBox      *m_plotChk[8]  = {};   // DTS,DTSC,VDD,VDDP3,VEXT,BaroP,BaroT,BaroAlt
+    int             m_series[8]   = {};
     QPushButton    *m_logStartBtn = nullptr;
     QPushButton    *m_logStopBtn  = nullptr;
     QPushButton    *m_logSaveBtn  = nullptr;
     QLabel         *m_logStatus   = nullptr;
     Mf4Writer       m_mf4;
+    QVector<int>    m_logSel;            // channel indices selected for logging
     bool            m_logging     = false;
     QElapsedTimer   m_timeBase;         // running since connect (plot x-axis)
     qint64          m_logStartMs  = 0;

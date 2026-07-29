@@ -10,17 +10,30 @@
 static int selftestMf4(const QString &path)
 {
     Mf4Writer w;
+    w.begin({
+        {"DieTemp_DTS",     "\xC2\xB0""C", true},
+        {"DieTemp_DTSC",    "\xC2\xB0""C", true},
+        {"VDD",             "V",           true},
+        {"VDDP3",           "V",           true},
+        {"VEXT",            "V",           true},
+        {"BaroPressure",    "hPa",         true},
+        {"BaroTemperature", "\xC2\xB0""C", true},
+        {"BaroAltitude",    "m",           true},
+        {"TickMs",          "ms",          false},
+        {"DiagStatus",      QString(),     false},
+    });
     for (int i = 0; i < 100; ++i) {
-        Mf4Writer::Sample s;
-        s.t     = i * 0.1;
-        s.dts   = 50.0f + 2.0f * float(std::sin(i * 0.1));
-        s.dtsc  = 50.5f + 2.0f * float(std::sin(i * 0.1 + 0.2));
-        s.vdd   = 1.25f;
-        s.vddp3 = 3.30f;
-        s.vext  = 5.00f;
-        s.tick  = quint32(1000 + i * 100);
-        s.diag  = (i >= 50) ? 0x10u : 0x00u;
-        w.append(s);
+        const double p = 956.0 + 0.5 * std::sin(i * 0.1);
+        w.append(i * 0.1, {
+            50.0 + 2.0 * std::sin(i * 0.1),
+            50.5 + 2.0 * std::sin(i * 0.1 + 0.2),
+            1.25, 3.30, 5.00,
+            p,
+            26.8,
+            44330.0 * (1.0 - std::pow(p / 1013.25, 0.190295)),
+            double(1000 + i * 100),
+            double((i >= 50) ? 0x10u : 0x00u),
+        });
     }
     QString err;
     if (!w.save(path, &err)) {

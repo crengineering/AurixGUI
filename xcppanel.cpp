@@ -26,7 +26,10 @@
 #include <QSet>
 #include <QSettings>
 #include <QCoreApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <cstring>
+#include <functional>
 
 namespace {
 // Fixed addresses, see Measurements.h / Diagnostics.h in the firmware.
@@ -51,6 +54,7 @@ constexpr int     NVM_MAX_RETRIES = 10;
 struct NvmParam { const char *key; const char *name; };
 constexpr NvmParam NVM_PARAMS[] = {
     {"userValue", "userValue - free uint32 (validation)"},
+    {"seaLevelPa", "seaLevelPa - sea-level ref [Pa] for baro altitude (QNH)"},
 };
 constexpr int NVM_VALUES = int(sizeof(NVM_PARAMS) / sizeof(NVM_PARAMS[0]));
 
@@ -74,6 +78,33 @@ constexpr DiagBit DIAG_BITS[] = {
 };
 constexpr int DIAG_ROWS = int(sizeof(DIAG_BITS) / sizeof(DIAG_BITS[0]));
 constexpr int DIAG_TAB_INDEX = 1;   // "Diagnostics" position in the sub-tabs
+
+// Master list of channels the user can log to MF4. Each carries an accessor
+// from a received measurement frame; isFloat=false selects a uint32 column
+// (tick/diag). Pressure is logged in hPa to match the live/plot display.
+struct LogChannel {
+    QString name;
+    QString unit;
+    bool    isFloat;
+    std::function<double(const XcpClient::Measurements &)> get;
+};
+
+const QVector<LogChannel> &logChannels()
+{
+    static const QVector<LogChannel> chans = {
+        {"DieTemp_DTS",     "\xC2\xB0""C", true,  [](const XcpClient::Measurements &m){ return double(m.dieTempC); }},
+        {"DieTemp_DTSC",    "\xC2\xB0""C", true,  [](const XcpClient::Measurements &m){ return double(m.dtscTempC); }},
+        {"VDD",             "V",           true,  [](const XcpClient::Measurements &m){ return double(m.vddCore); }},
+        {"VDDP3",           "V",           true,  [](const XcpClient::Measurements &m){ return double(m.vddp3); }},
+        {"VEXT",            "V",           true,  [](const XcpClient::Measurements &m){ return double(m.vext); }},
+        {"BaroPressure",    "hPa",         true,  [](const XcpClient::Measurements &m){ return double(m.baroPressPa) / 100.0; }},
+        {"BaroTemperature", "\xC2\xB0""C", true,  [](const XcpClient::Measurements &m){ return double(m.baroTempC); }},
+        {"BaroAltitude",    "m",           true,  [](const XcpClient::Measurements &m){ return double(m.baroAltM); }},
+        {"TickMs",          "ms",          false, [](const XcpClient::Measurements &m){ return double(m.tickMs); }},
+        {"DiagStatus",      QString(),     false, [](const XcpClient::Measurements &m){ return double(m.diagStatus); }},
+    };
+    return chans;
+}
 
 // The calibration table is now built from the A2L CHARACTERISTIC list
 // (see A2lModel). These helpers decode/encode a cell value per record type.
@@ -194,6 +225,9 @@ QWidget *XcpPanel::buildLiveTab()
     m_vddLbl     = new QLabel("-");
     m_vddp3Lbl   = new QLabel("-");
     m_vextLbl    = new QLabel("-");
+    m_baroPressLbl = new QLabel("-");
+    m_baroTempLbl  = new QLabel("-");
+    m_baroAltLbl   = new QLabel("-");
 
     QFont bigFont = m_tempLbl->font();
     bigFont.setPointSize(bigFont.pointSize() * 2);
@@ -208,6 +242,9 @@ QWidget *XcpPanel::buildLiveTab()
     form->addRow("VDD 1.25 V:",             m_vddLbl);
     form->addRow("VDDP3 3.3 V:",            m_vddp3Lbl);
     form->addRow("VEXT 5 V:",               m_vextLbl);
+    form->addRow("Baro pressure (BMP388):", m_baroPressLbl);
+    form->addRow("Baro temperature:",       m_baroTempLbl);
+    form->addRow("Baro altitude:",          m_baroAltLbl);
 
     m_log = new QPlainTextEdit;
     m_log->setReadOnly(true);
@@ -467,16 +504,22 @@ QWidget *XcpPanel::buildNvmTab()
 QWidget *XcpPanel::buildPlotTab()
 {
     m_plot = new PlotWidget;
-    const struct { const char *name; QColor color; bool on; } defs[5] = {
-        {"DTS [°C]",   QColor(200, 60, 60),  true},
-        {"DTSC [°C]",  QColor(230, 140, 40), true},
-        {"VDD [V]",    QColor(60, 120, 200), false},
-        {"VDDP3 [V]",  QColor(60, 180, 90),  false},
-        {"VEXT [V]",   QColor(140, 80, 200), false},
+    // Pressure (~956 hPa) shares the common autoscaled y-axis, so it is default
+    // off like the volts — toggle it on its own for a readable trend; baro temp
+    // overlays the die temps (same scale).
+    const struct { const char *name; QColor color; bool on; } defs[8] = {
+        {"DTS [°C]",     QColor(200, 60, 60),  true},
+        {"DTSC [°C]",    QColor(230, 140, 40), true},
+        {"VDD [V]",      QColor(60, 120, 200), false},
+        {"VDDP3 [V]",    QColor(60, 180, 90),  false},
+        {"VEXT [V]",     QColor(140, 80, 200), false},
+        {"Baro P [hPa]", QColor(0, 160, 160),  false},
+        {"Baro T [°C]",  QColor(170, 40, 120), false},
+        {"Baro alt [m]", QColor(90, 90, 90),   false},
     };
 
     auto *chkRow = new QHBoxLayout;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 8; ++i) {
         m_series[i]  = m_plot->addSeries(QString::fromUtf8(defs[i].name), defs[i].color);
         m_plotChk[i] = new QCheckBox(QString::fromUtf8(defs[i].name));
         m_plotChk[i]->setChecked(defs[i].on);
@@ -537,7 +580,7 @@ void XcpPanel::onConnected(const QString &ident)
     m_pollTimer->start();
     readCalibration();                          // populate the calibration tab
     m_client->pollMeasurements(XCP_DATA_ADDR);  // one poll: version + magic
-    m_client->startDaq(XCP_DATA_ADDR + 8, 32);  // then event-driven streaming
+    m_client->startDaq(XCP_DATA_ADDR + 8, 44);  // then event-driven streaming
 }
 
 void XcpPanel::onDaqStarted()
@@ -579,6 +622,17 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
     m_vddp3Lbl->setText(QString::number(double(m.vddp3), 'f', 3) + " V");
     m_vextLbl->setText(QString::number(double(m.vext), 'f', 3) + " V");
 
+    if (m.baroPresent) {
+        // show hPa (1 hPa = 100 Pa) — the familiar barometric unit
+        m_baroPressLbl->setText(QString::number(double(m.baroPressPa) / 100.0, 'f', 2) + " hPa");
+        m_baroTempLbl->setText(QString::number(double(m.baroTempC), 'f', 1) + " °C");
+        m_baroAltLbl->setText(QString::number(double(m.baroAltM), 'f', 1) + " m (vs 1013.25 hPa)");
+    } else {
+        m_baroPressLbl->setText("n/a (not detected)");
+        m_baroTempLbl->setText("n/a");
+        m_baroAltLbl->setText("n/a");
+    }
+
     updateDiagTable(m.diagStatus);
 
     // plot + logging feed
@@ -589,31 +643,93 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
     m_plot->appendPoint(m_series[2], t, double(m.vddCore));
     m_plot->appendPoint(m_series[3], t, double(m.vddp3));
     m_plot->appendPoint(m_series[4], t, double(m.vext));
+    if (m.baroPresent) {
+        m_plot->appendPoint(m_series[5], t, double(m.baroPressPa) / 100.0);  // hPa
+        m_plot->appendPoint(m_series[6], t, double(m.baroTempC));
+        m_plot->appendPoint(m_series[7], t, double(m.baroAltM));
+    }
 
     if (m_logging) {
-        Mf4Writer::Sample s;
-        s.t     = double(m_timeBase.elapsed() - m_logStartMs) / 1000.0;
-        s.dts   = m.dieTempC;
-        s.dtsc  = m.dtscTempC;
-        s.vdd   = m.vddCore;
-        s.vddp3 = m.vddp3;
-        s.vext  = m.vext;
-        s.tick  = m.tickMs;
-        s.diag  = m.diagStatus;
-        m_mf4.append(s);
+        const auto &chans = logChannels();
+        QVector<double> values;
+        values.reserve(m_logSel.size());
+        for (int idx : m_logSel)
+            values.append(chans[idx].get(m));
+        m_mf4.append(double(m_timeBase.elapsed() - m_logStartMs) / 1000.0, values);
         updateLogStatus();
     }
 }
 
+// Modal picker shown before each logging session. Returns false if the user
+// cancelled or left everything unchecked; otherwise fills *out with the chosen
+// channel indices (into logChannels()).
+bool XcpPanel::chooseLogChannels(QVector<int> *out)
+{
+    const auto &chans = logChannels();
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Select channels to log");
+    auto *v = new QVBoxLayout(&dlg);
+    v->addWidget(new QLabel("Choose which measurement values to record:"));
+
+    QVector<QCheckBox *> boxes;
+    for (int i = 0; i < chans.size(); ++i) {
+        auto *cb = new QCheckBox(chans[i].name
+                                 + (chans[i].unit.isEmpty() ? QString()
+                                                            : " [" + chans[i].unit + "]"));
+        // default: all on for the first session, else remember the last choice
+        cb->setChecked(m_logSel.isEmpty() ? true : m_logSel.contains(i));
+        boxes.append(cb);
+        v->addWidget(cb);
+    }
+
+    auto *selAllBtn = new QPushButton("Select all");
+    connect(selAllBtn, &QPushButton::clicked, &dlg, [&boxes]() {
+        for (QCheckBox *b : boxes) b->setChecked(true);
+    });
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    auto *btnRow = new QHBoxLayout;
+    btnRow->addWidget(selAllBtn);
+    btnRow->addStretch(1);
+    btnRow->addWidget(buttons);
+    v->addLayout(btnRow);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+
+    out->clear();
+    for (int i = 0; i < boxes.size(); ++i)
+        if (boxes[i]->isChecked())
+            out->append(i);
+    return !out->isEmpty();
+}
+
 void XcpPanel::startLogging()
 {
-    m_mf4.clear();
+    QVector<int> sel;
+    if (!chooseLogChannels(&sel)) {
+        m_log->appendPlainText("[Logging not started - cancelled or no channels selected]");
+        return;
+    }
+    m_logSel = sel;
+
+    const auto &chans = logChannels();
+    QVector<Mf4Writer::Channel> cfg;
+    cfg.reserve(sel.size());
+    for (int idx : sel)
+        cfg.append({chans[idx].name, chans[idx].unit, chans[idx].isFloat});
+    m_mf4.begin(cfg);
+
     m_logStartMs = m_timeBase.elapsed();
     m_logging    = true;
     m_logStartBtn->setEnabled(false);
     m_logStopBtn->setEnabled(true);
     m_logSaveBtn->setEnabled(false);
-    m_log->appendPlainText("[Logging started]");
+    m_log->appendPlainText(QString("[Logging started - %1 channels]").arg(sel.size()));
     updateLogStatus();
 }
 
@@ -1014,6 +1130,9 @@ void XcpPanel::setConnectedState(bool connected)
         m_vddLbl->setText("-");
         m_vddp3Lbl->setText("-");
         m_vextLbl->setText("-");
+        m_baroPressLbl->setText("-");
+        m_baroTempLbl->setText("-");
+        m_baroAltLbl->setText("-");
         m_identLbl->setText("-");
         m_diagSummary->setText("Not connected");
         m_diagSummary->setStyleSheet("");

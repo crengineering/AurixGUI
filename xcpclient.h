@@ -28,6 +28,10 @@ public:
         float   vddp3      = 0.0f;  // 3.3 V rail [V]
         float   vext       = 0.0f;  // 5 V board supply [V]
         quint32 diagStatus = 0;     // diagnostics bitmask (DIAGNOSTICS.md)
+        float   baroPressPa = 0.0f; // BMP388 pressure [Pa]
+        float   baroTempC   = 0.0f; // BMP388 temperature [degC]
+        float   baroAltM    = 0.0f; // pressure altitude [m]
+        bool    baroPresent = false;// BMP388 answered at init
         bool    valid      = false; // magic word matched
     };
 

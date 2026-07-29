@@ -24,7 +24,7 @@ constexpr quint8 PID_RES = 0xFF;
 constexpr quint8 PID_ERR = 0xFE;
 
 constexpr quint32 XCP_DATA_MAGIC = 0x41555258;  // must match Measurements.h
-constexpr int     XCP_DATA_SIZE  = 40;          // v1.2.0 block
+constexpr int     XCP_DATA_SIZE  = 52;          // v1.9.0 block (+ baro P/T/alt)
 constexpr int     TIMEOUT_MS     = 500;
 }
 
@@ -205,8 +205,9 @@ void XcpClient::onReadyRead()
 void XcpClient::handleDaqFrame(const QByteArray &packet)
 {
     // single ODT 0: tick u32, dts f, dtsc f, vdd f, vddp3 f, vext f,
-    // raw codes u32, diagStatus u32  (= Xcp_Data + 8, 32 bytes)
-    if (quint8(packet[0]) != 0 || packet.size() < 1 + 32)
+    // raw codes u32 (byte 27 = baroPresent), diagStatus u32, baroPress f,
+    // baroTemp f, baroAlt f  (= Xcp_Data + 8, 44 bytes)
+    if (quint8(packet[0]) != 0 || packet.size() < 1 + 44)
         return;
 
     const char *d = packet.constData() + 1;
@@ -221,12 +222,16 @@ void XcpClient::handleDaqFrame(const QByteArray &packet)
         std::memcpy(&f, d + off, sizeof(f));
         return f;
     };
-    m.dieTempC   = readF(4);
-    m.dtscTempC  = readF(8);
-    m.vddCore    = readF(12);
-    m.vddp3      = readF(16);
-    m.vext       = readF(20);
-    m.diagStatus = qFromLittleEndian<quint32>(d + 28);
+    m.dieTempC    = readF(4);
+    m.dtscTempC   = readF(8);
+    m.vddCore     = readF(12);
+    m.vddp3       = readF(16);
+    m.vext        = readF(20);
+    m.baroPresent = (quint8(d[27]) != 0);
+    m.diagStatus  = qFromLittleEndian<quint32>(d + 28);
+    m.baroPressPa = readF(32);
+    m.baroTempC   = readF(36);
+    m.baroAltM    = readF(40);
     emit measurementsReceived(m);
 }
 
@@ -306,12 +311,16 @@ void XcpClient::handleResponse(const QByteArray &packet)
                 std::memcpy(&f, d + off, sizeof(f));         // IEEE754 LE
                 return f;
             };
-            m.dieTempC   = readF(12);
-            m.dtscTempC  = readF(16);
-            m.vddCore    = readF(20);
-            m.vddp3      = readF(24);
-            m.vext       = readF(28);
-            m.diagStatus = qFromLittleEndian<quint32>(d + 36);
+            m.dieTempC    = readF(12);
+            m.dtscTempC   = readF(16);
+            m.vddCore     = readF(20);
+            m.vddp3       = readF(24);
+            m.vext        = readF(28);
+            m.baroPresent = (quint8(d[35]) != 0);
+            m.diagStatus  = qFromLittleEndian<quint32>(d + 36);
+            m.baroPressPa = readF(40);
+            m.baroTempC   = readF(44);
+            m.baroAltM    = readF(48);
             m_verMajor = m.verMajor;             // cache for DAQ frames
             m_verMinor = m.verMinor;
             m_verStep  = m.verStep;
