@@ -54,6 +54,13 @@ int main(int argc, char *argv[])
     // QApplication haelt die Event-Loop am Laufen (wie in PyQt6).
     QApplication app(argc, argv);
 
+    // Deterministic QSettings location. Without an explicit organisation and
+    // application name Qt derives one from the executable, so the remembered
+    // A2L path and the saved plot layout could land somewhere unexpected -
+    // or not be found again after a rename.
+    QCoreApplication::setOrganizationName("AurixTricore");
+    QCoreApplication::setApplicationName("AurixMonitor");
+
     MainWindow window;
     window.show();
 

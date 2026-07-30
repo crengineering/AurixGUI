@@ -46,6 +46,7 @@ public:
 
 signals:
     void removeRequested(PlotPane *pane);
+    void configChanged();          // selection edited -> the panel autosaves
 
 private slots:
     void editSignals();

@@ -7,6 +7,7 @@
 #include "xcpclient.h"
 #include "mf4writer.h"
 #include "a2lmodel.h"
+#include <QJsonObject>
 
 class QLineEdit;
 class QSpinBox;
@@ -114,6 +115,17 @@ private:
     QWidget        *buildSensorsTab();
     void            rebuildDiagTable();
     void            addPlotPane();
+
+    // Plot & Log configuration: which plots exist, which signals each draws,
+    // and which channels are selected for logging. Setting a test up by hand
+    // takes real time, so the layout is restored automatically on start-up and
+    // can also be saved to a named file to switch between test setups.
+    QJsonObject     configToJson() const;
+    void            applyConfig(const QJsonObject &obj);
+    void            saveConfigToFile();
+    void            loadConfigFromFile();
+    void            autosaveConfig();      // -> QSettings, on every change
+    void            restoreAutosavedConfig();
     void            relayoutPlots();
     void            rebuildSensorsTab();
     void            updateSensorValues(const XcpClient::Measurements &m);

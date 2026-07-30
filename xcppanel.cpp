@@ -19,6 +19,7 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QFormLayout>
+#include <QJsonArray>
 #include <algorithm>
 #include <cmath>
 #include <QScrollArea>
@@ -196,6 +197,11 @@ XcpPanel::XcpPanel(QWidget *parent)
     connect(m_client, &XcpClient::daqStarted,           this, &XcpPanel::onDaqStarted);
     connect(m_client, &XcpClient::daqFailed,            this, &XcpPanel::onDaqFailed);
     connect(m_client, &XcpClient::errorOccurred,        this, &XcpPanel::onError);
+
+    // Bring back the plots and log channels from the last session. Runs after
+    // the tabs exist and after loadA2l() has filled m_meas, because signals are
+    // resolved by name against the A2L.
+    restoreAutosavedConfig();
 
     // connect to the board automatically on startup (with the default
     // host/port); a failed attempt just logs a timeout and can be retried
@@ -693,6 +699,176 @@ QWidget *XcpPanel::buildNvmTab()
 }
 
 
+
+// ---------------------------------------------------------------------------
+// Plot & Log configuration
+//
+// Setting up a specific test - several plots, the right signals on each, the
+// right log channels - takes real time, and losing it on every restart is the
+// actual complaint. So two things happen here:
+//
+//   * the current layout is autosaved to QSettings on every change and
+//     restored at start-up, so a plain restart needs no action at all;
+//   * it can also be saved to a named .json file, so different tests keep
+//     their own setups and can be shared or version-controlled.
+//
+// Signals are stored BY NAME, never by index. Indices shift the moment the
+// firmware gains or loses a MEASUREMENT, which would silently repoint a saved
+// plot at the wrong signal - the sort of failure that looks like a sensor bug.
+// A name that no longer exists is simply dropped.
+// ---------------------------------------------------------------------------
+namespace { constexpr int PLOTCFG_VERSION = 1; }
+
+QJsonObject XcpPanel::configToJson() const
+{
+    QJsonArray plots;
+    for (const PlotPane *pane : m_plotPanes) {
+        QJsonArray sigs;
+        for (const QString &n : pane->selectedNames())
+            sigs.append(n);
+        QJsonObject p;
+        p["signals"] = sigs;
+        plots.append(p);
+    }
+
+    QJsonArray logChans;
+    for (int idx : m_logSel)
+        if (idx >= 0 && idx < m_signalIdx.size())
+            logChans.append(m_meas[m_signalIdx[idx]].name);
+
+    QJsonObject root;
+    root["version"]     = PLOTCFG_VERSION;
+    root["plots"]       = plots;
+    root["logChannels"] = logChans;
+    return root;
+}
+
+void XcpPanel::applyConfig(const QJsonObject &obj)
+{
+    if (obj.value("version").toInt() != PLOTCFG_VERSION) {
+        m_log->appendPlainText("[Plot config ignored: unsupported version]");
+        return;
+    }
+
+    // Rebuild the panes from scratch so loading is idempotent.
+    const QVector<PlotPane *> old = m_plotPanes;
+    m_plotPanes.clear();
+    for (PlotPane *p : old) {
+        m_plotGrid->removeWidget(p);
+        p->deleteLater();
+    }
+
+    const QJsonArray plots = obj.value("plots").toArray();
+    for (const QJsonValue &pv : plots) {
+        addPlotPane();
+        QVector<QString> names;
+        for (const QJsonValue &sv : pv.toObject().value("signals").toArray())
+            names.append(sv.toString());
+        m_plotPanes.last()->setSelectedNames(names);
+    }
+    relayoutPlots();
+
+    // Log channels resolve by name; anything the current A2L no longer
+    // describes is dropped rather than shifting the remaining selection.
+    m_logSel.clear();
+    for (const QJsonValue &lv : obj.value("logChannels").toArray()) {
+        const QString want = lv.toString();
+        for (int i = 0; i < m_signalIdx.size(); ++i) {
+            if (m_meas[m_signalIdx[i]].name == want) {
+                m_logSel.append(i);
+                break;
+            }
+        }
+    }
+
+    // Save once more at the very end. Building the panes above already fires
+    // autosaves, but those run while m_logSel still holds the previous value,
+    // so without this the log-channel selection is written back empty and is
+    // lost on the next restart even though the plots survive.
+    autosaveConfig();
+}
+
+void XcpPanel::autosaveConfig()
+{
+    QSettings settings;
+    settings.setValue("plotConfig",
+                      QString::fromUtf8(QJsonDocument(configToJson()).toJson(QJsonDocument::Compact)));
+}
+
+void XcpPanel::restoreAutosavedConfig()
+{
+    QSettings settings;
+    const QString js = settings.value("plotConfig").toString();
+    if (js.isEmpty())
+        return;
+
+    // Without an A2L there is nothing to resolve signal names against, so the
+    // restore would produce empty plots - and the next autosave would then
+    // overwrite a perfectly good saved layout with that emptiness. Leave the
+    // setting untouched instead.
+    if (m_meas.isEmpty()) {
+        m_log->appendPlainText("[Plot layout not restored: no A2L loaded]");
+        return;
+    }
+
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(js.toUtf8(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject())
+        return;                       // corrupt setting: start empty, no fuss
+
+    applyConfig(doc.object());
+    if (!m_plotPanes.isEmpty())
+        m_log->appendPlainText(QString("[Plot layout restored: %1 plot(s)]")
+                                   .arg(m_plotPanes.size()));
+}
+
+void XcpPanel::saveConfigToFile()
+{
+    QString path = QFileDialog::getSaveFileName(
+        this, "Save plot & log configuration", QString(),
+        "Plot configuration (*.json);;All files (*)");
+    if (path.isEmpty())
+        return;
+    if (!path.endsWith(".json", Qt::CaseInsensitive))
+        path += ".json";
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        m_log->appendPlainText("[Config save failed: " + f.errorString() + "]");
+        return;
+    }
+    f.write(QJsonDocument(configToJson()).toJson(QJsonDocument::Indented));
+    m_log->appendPlainText("[Configuration saved: " + QDir::toNativeSeparators(path) + "]");
+}
+
+void XcpPanel::loadConfigFromFile()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, "Load plot & log configuration", QString(),
+        "Plot configuration (*.json);;All files (*)");
+    if (path.isEmpty())
+        return;
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        m_log->appendPlainText("[Config load failed: " + f.errorString() + "]");
+        return;
+    }
+
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+        m_log->appendPlainText("[Config load failed: " + err.errorString() + "]");
+        return;
+    }
+
+    applyConfig(doc.object());
+    autosaveConfig();
+    m_log->appendPlainText(QString("[Configuration loaded: %1 - %2 plot(s)]")
+                               .arg(QDir::toNativeSeparators(path))
+                               .arg(m_plotPanes.size()));
+}
+
 QWidget *XcpPanel::buildPlotTab()
 {
     // No plots exist at start-up: the user adds one and picks its signals.
@@ -713,8 +889,18 @@ QWidget *XcpPanel::buildPlotTab()
 
     m_plotHint = new QLabel("No plots yet - press \"Add plot\", then \"Signals...\" to choose what it draws.");
 
+    auto *saveCfgBtn = new QPushButton("Save config...");
+    saveCfgBtn->setToolTip("Save the plots, their signals and the log channel "
+                           "selection to a file, so a test setup can be reused");
+    connect(saveCfgBtn, &QPushButton::clicked, this, &XcpPanel::saveConfigToFile);
+
+    auto *loadCfgBtn = new QPushButton("Load config...");
+    connect(loadCfgBtn, &QPushButton::clicked, this, &XcpPanel::loadConfigFromFile);
+
     auto *topRow = new QHBoxLayout;
     topRow->addWidget(m_addPlotBtn);
+    topRow->addWidget(saveCfgBtn);
+    topRow->addWidget(loadCfgBtn);
     topRow->addWidget(m_plotHint, 1);
 
     m_logStartBtn = new QPushButton("Start Log");
@@ -748,8 +934,10 @@ void XcpPanel::addPlotPane()
 {
     auto *pane = new PlotPane(m_plotPanes.size(), m_meas, m_plotGridHost);
     connect(pane, &PlotPane::removeRequested, this, &XcpPanel::removePlotPane);
+    connect(pane, &PlotPane::configChanged,   this, &XcpPanel::autosaveConfig);
     m_plotPanes.append(pane);
     relayoutPlots();
+    autosaveConfig();
 }
 
 void XcpPanel::removePlotPane(PlotPane *pane)
@@ -761,6 +949,7 @@ void XcpPanel::removePlotPane(PlotPane *pane)
     m_plotGrid->removeWidget(pane);
     pane->deleteLater();
     relayoutPlots();
+    autosaveConfig();
 }
 
 // Two plots per row, as wide as the tab allows.
@@ -960,6 +1149,7 @@ void XcpPanel::startLogging()
         return;
     }
     m_logSel = sel;
+    autosaveConfig();
 
     QVector<Mf4Writer::Channel> cfg;
     cfg.reserve(sel.size());

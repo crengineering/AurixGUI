@@ -85,6 +85,7 @@ void PlotPane::setSelectedNames(const QVector<QString> &names)
         if (want.contains(m.name))
             m_selected.append(m);
     rebuildSeries();
+    emit configChanged();
 }
 
 void PlotPane::rebuildSeries()
