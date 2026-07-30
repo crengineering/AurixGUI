@@ -31,6 +31,7 @@ public:
 
 signals:
     void connectionChanged(bool connected);   // drives the tab lamp icon
+    void measurementsUpdated(const XcpClient::Measurements &m);  // -> SystemFooter
 
 private slots:
     void toggleConnection();
@@ -89,6 +90,9 @@ private:
     QLabel         *m_baroPressLbl = nullptr;   // BMP388 pressure
     QLabel         *m_baroTempLbl  = nullptr;   // BMP388 temperature
     QLabel         *m_baroAltLbl   = nullptr;   // pressure altitude
+    QLabel         *m_imuAccelLbl  = nullptr;   // MPU-6050 accel x/y/z [g]
+    QLabel         *m_imuGyroLbl   = nullptr;   // MPU-6050 gyro x/y/z [deg/s]
+    QLabel         *m_imuTempLbl   = nullptr;   // MPU-6050 die temperature
     QPlainTextEdit *m_log        = nullptr;
 
     // diagnostics tab
@@ -104,11 +108,23 @@ private:
     // row index == index into m_chars.
     void            writeCalRow(int row);
     void            loadA2l(const QString &path, bool remember);
+    QWidget        *buildSensorsTab();
+    void            rebuildPlotSeries();
+    void            rebuildSensorsTab();
+    void            updateSensorValues(const XcpClient::Measurements &m);
     void            rebuildCalTable();
     bool            populateCharsFromRead(quint32 base, const QByteArray &data);
     QString         defaultA2lPath() const;
     QVector<A2lChar> m_chars;
     QString         m_a2lPath;
+
+    // Sensors tab: built from the A2L MEASUREMENT list, grouped by name
+    // prefix. m_sensorVal[i] is the value label for m_meas[i], so a new
+    // MEASUREMENT in the A2L needs no GUI change at all.
+    QVector<A2lMeas> m_meas;
+    QVector<QLabel*> m_sensorVal;
+    QWidget         *m_sensorsPage   = nullptr;
+    QLabel          *m_sensorsStatus = nullptr;
     QLabel         *m_a2lStatus    = nullptr;
     QPushButton    *m_a2lLoadBtn   = nullptr;
     QTableWidget   *m_calTable     = nullptr;
@@ -131,9 +147,17 @@ private:
     int             m_nvmRetries  = 0;
 
     // plot & logging tab
+    // 15 series: DTS,DTSC,VDD,VDDP3,VEXT,BaroP,BaroT,BaroAlt,
+    //            AccelX,AccelY,AccelZ,GyroX,GyroY,GyroZ,ImuTemp
+    // Plot series and log channels are built from the A2L MEASUREMENT list
+    // (m_meas), so the set of plottable/loggable signals follows the firmware
+    // description. m_signalIdx maps a series/channel index to an entry in
+    // m_meas; BIT_MASK diagnostics bits are excluded.
+    QVector<int>     m_signalIdx;
     PlotWidget     *m_plot        = nullptr;
-    QCheckBox      *m_plotChk[8]  = {};   // DTS,DTSC,VDD,VDDP3,VEXT,BaroP,BaroT,BaroAlt
-    int             m_series[8]   = {};
+    QVector<QCheckBox *> m_plotChk;
+    QVector<int>         m_series;
+    QWidget             *m_plotChkHost = nullptr;
     QPushButton    *m_logStartBtn = nullptr;
     QPushButton    *m_logStopBtn  = nullptr;
     QPushButton    *m_logSaveBtn  = nullptr;

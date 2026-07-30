@@ -65,6 +65,7 @@ bool mapBaseType(const QString &bt, A2lType *out)
 {
     if (bt == QLatin1String("FLOAT32_IEEE")) { *out = A2lType::Float32; return true; }
     if (bt == QLatin1String("ULONG"))        { *out = A2lType::Uint32;  return true; }
+    if (bt == QLatin1String("UWORD"))        { *out = A2lType::Uint16;  return true; }
     if (bt == QLatin1String("UBYTE"))        { *out = A2lType::Uint8;   return true; }
     return false;                   // other base types are not needed here
 }
@@ -144,5 +145,62 @@ QVector<A2lChar> A2lModel::parseFile(const QString &path, QString *err)
 
     if (out.isEmpty() && err && err->isEmpty())
         *err = QStringLiteral("no CHARACTERISTIC entries found");
+    return out;
+}
+
+QVector<A2lMeas> A2lModel::parseMeasurements(const QString &path, QString *err)
+{
+    QVector<A2lMeas> out;
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        if (err) *err = f.errorString();
+        return out;
+    }
+
+    const QString text = stripBlockComments(QString::fromUtf8(f.readAll()));
+    const QVector<QString> t = tokenize(text);
+
+    // MEASUREMENT <name> <desc> <baseType> <conv> <res> <accuracy> <lo> <hi>
+    // then optional ECU_ADDRESS / PHYS_UNIT / BIT_MASK lines.
+    for (int i = 0; i + 9 < t.size(); ++i) {
+        if (t[i] != QLatin1String("/begin") ||
+            t[i + 1] != QLatin1String("MEASUREMENT"))
+            continue;
+
+        A2lMeas m;
+        m.name = t[i + 2];
+        m.desc = t[i + 3];
+        if (!mapBaseType(t[i + 4], &m.type))
+            continue;                       // unsupported base type: skip
+        m.lo = t[i + 8].toDouble();
+        m.hi = t[i + 9].toDouble();
+
+        bool haveAddr = false;
+        int depth = 1;
+        int j = i + 10;
+        for (; j < t.size() && depth > 0; ++j) {
+            const QString &tok = t[j];
+            if (tok == QLatin1String("/begin")) { ++depth; continue; }
+            if (tok == QLatin1String("/end"))   { --depth; continue; }
+            if (depth != 1)
+                continue;
+            if (tok == QLatin1String("ECU_ADDRESS") && j + 1 < t.size()) {
+                m.addr   = t[j + 1].toUInt(nullptr, 0);
+                haveAddr = true;
+            } else if (tok == QLatin1String("PHYS_UNIT") && j + 1 < t.size()) {
+                m.unit = t[j + 1];
+            } else if (tok == QLatin1String("BIT_MASK")) {
+                m.isBitMask = true;
+            }
+        }
+
+        if (haveAddr)
+            out.append(m);
+        i = j - 1;                          // resume after this block
+    }
+
+    if (out.isEmpty() && err && err->isEmpty())
+        *err = QStringLiteral("no MEASUREMENT entries found");
     return out;
 }

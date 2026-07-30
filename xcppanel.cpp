@@ -17,6 +17,9 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QFormLayout>
+#include <cmath>
+#include <QScrollArea>
+#include <QGroupBox>
 #include <QtEndian>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -82,29 +85,7 @@ constexpr int DIAG_TAB_INDEX = 1;   // "Diagnostics" position in the sub-tabs
 // Master list of channels the user can log to MF4. Each carries an accessor
 // from a received measurement frame; isFloat=false selects a uint32 column
 // (tick/diag). Pressure is logged in hPa to match the live/plot display.
-struct LogChannel {
-    QString name;
-    QString unit;
-    bool    isFloat;
-    std::function<double(const XcpClient::Measurements &)> get;
-};
 
-const QVector<LogChannel> &logChannels()
-{
-    static const QVector<LogChannel> chans = {
-        {"DieTemp_DTS",     "\xC2\xB0""C", true,  [](const XcpClient::Measurements &m){ return double(m.dieTempC); }},
-        {"DieTemp_DTSC",    "\xC2\xB0""C", true,  [](const XcpClient::Measurements &m){ return double(m.dtscTempC); }},
-        {"VDD",             "V",           true,  [](const XcpClient::Measurements &m){ return double(m.vddCore); }},
-        {"VDDP3",           "V",           true,  [](const XcpClient::Measurements &m){ return double(m.vddp3); }},
-        {"VEXT",            "V",           true,  [](const XcpClient::Measurements &m){ return double(m.vext); }},
-        {"BaroPressure",    "hPa",         true,  [](const XcpClient::Measurements &m){ return double(m.baroPressPa) / 100.0; }},
-        {"BaroTemperature", "\xC2\xB0""C", true,  [](const XcpClient::Measurements &m){ return double(m.baroTempC); }},
-        {"BaroAltitude",    "m",           true,  [](const XcpClient::Measurements &m){ return double(m.baroAltM); }},
-        {"TickMs",          "ms",          false, [](const XcpClient::Measurements &m){ return double(m.tickMs); }},
-        {"DiagStatus",      QString(),     false, [](const XcpClient::Measurements &m){ return double(m.diagStatus); }},
-    };
-    return chans;
-}
 
 // The calibration table is now built from the A2L CHARACTERISTIC list
 // (see A2lModel). These helpers decode/encode a cell value per record type.
@@ -187,6 +168,7 @@ XcpPanel::XcpPanel(QWidget *parent)
 
     m_subTabs = new QTabWidget;
     m_subTabs->addTab(buildLiveTab(), "Live Data");
+    m_subTabs->addTab(buildSensorsTab(), "Sensors");
     m_subTabs->addTab(buildDiagTab(), "Diagnostics");
     m_subTabs->addTab(buildCalTab(),  "Calibration");
     m_subTabs->addTab(buildNvmTab(),  "DFLASH");
@@ -228,6 +210,9 @@ QWidget *XcpPanel::buildLiveTab()
     m_baroPressLbl = new QLabel("-");
     m_baroTempLbl  = new QLabel("-");
     m_baroAltLbl   = new QLabel("-");
+    m_imuAccelLbl  = new QLabel("-");
+    m_imuGyroLbl   = new QLabel("-");
+    m_imuTempLbl   = new QLabel("-");
 
     QFont bigFont = m_tempLbl->font();
     bigFont.setPointSize(bigFont.pointSize() * 2);
@@ -245,6 +230,9 @@ QWidget *XcpPanel::buildLiveTab()
     form->addRow("Baro pressure (BMP388):", m_baroPressLbl);
     form->addRow("Baro temperature:",       m_baroTempLbl);
     form->addRow("Baro altitude:",          m_baroAltLbl);
+    form->addRow("IMU accel (MPU-6050):",   m_imuAccelLbl);
+    form->addRow("IMU gyro:",               m_imuGyroLbl);
+    form->addRow("IMU temperature:",        m_imuTempLbl);
 
     m_log = new QPlainTextEdit;
     m_log->setReadOnly(true);
@@ -255,6 +243,168 @@ QWidget *XcpPanel::buildLiveTab()
     layout->addLayout(form);
     layout->addWidget(m_log, 1);
     return tab;
+}
+
+
+// ---------------------------------------------------------------------------
+// Sensors tab
+//
+// Built entirely from the A2L MEASUREMENT list: the firmware description is
+// the single source of truth for which signals exist, their address, type,
+// unit and limits. Adding a MEASUREMENT to AurixTricore.a2l is enough to make
+// it appear here -- no GUI change, no rebuild of a hardcoded table.
+//
+// Values are decoded straight out of the raw Xcp_Data snapshot the client
+// already receives, indexed by (ECU_ADDRESS - XCP_DATA_ADDR), so showing more
+// signals costs no extra XCP traffic.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Which group a signal belongs to, from its name prefix. Order defines the
+// order the boxes appear in.
+struct SensorGroup { const char *title; const char *prefix; };
+
+const SensorGroup kSensorGroups[] = {
+    { "Onboard (die temperature, supply rails)", ""      },  // catch-all, matched last
+    { "Barometer - BMP388",                      "Baro"  },
+    { "IMU - MPU-6050",                          "Imu"   },
+    { "Attitude estimate - AHRS",                "Ahrs"  },
+    { "Core load",                               "Core"  },
+    { "Ethernet",                                "Eth"   },
+};
+constexpr int kGroupCount = int(sizeof(kSensorGroups) / sizeof(kSensorGroups[0]));
+
+int groupOf(const QString &name)
+{
+    for (int g = 1; g < kGroupCount; ++g)                 // skip the catch-all
+        if (name.startsWith(QLatin1String(kSensorGroups[g].prefix)))
+            return g;
+    return 0;
+}
+
+// Decode one measurement from the raw block. Returns false if the block does
+// not cover it (e.g. nothing received yet).
+bool decode(const QByteArray &raw, const A2lMeas &m, double *out)
+{
+    const int off = int(m.addr - XCP_DATA_ADDR);
+    const int len = a2lTypeSize(m.type);
+    if (off < 0 || raw.size() < off + len)
+        return false;
+
+    const char *d = raw.constData() + off;
+    switch (m.type) {
+    case A2lType::Float32: { float f = 0.0f; std::memcpy(&f, d, sizeof(f)); *out = double(f); break; }
+    case A2lType::Uint32:  *out = double(qFromLittleEndian<quint32>(d)); break;
+    case A2lType::Uint16:  *out = double(qFromLittleEndian<quint16>(d)); break;
+    case A2lType::Uint8:   *out = double(quint8(*d));                    break;
+    }
+    return true;
+}
+
+} // namespace
+
+QWidget *XcpPanel::buildSensorsTab()
+{
+    m_sensorsStatus = new QLabel("-");
+    m_sensorsPage   = new QWidget;
+    new QVBoxLayout(m_sensorsPage);        // filled by rebuildSensorsTab()
+
+    auto *outer = new QVBoxLayout;
+    outer->addWidget(new QLabel(
+        "Signals come from the A2L (MEASUREMENT list), grouped by name. "
+        "Add a MEASUREMENT to the firmware's .a2l and it appears here."));
+    outer->addWidget(m_sensorsStatus);
+
+    auto *scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setWidget(m_sensorsPage);
+    outer->addWidget(scroll, 1);
+
+    auto *page = new QWidget;
+    page->setLayout(outer);
+    rebuildSensorsTab();
+    return page;
+}
+
+void XcpPanel::rebuildSensorsTab()
+{
+    if (!m_sensorsPage)
+        return;
+
+    // Drop the previous contents; m_sensorVal points into them.
+    qDeleteAll(m_sensorsPage->findChildren<QGroupBox *>(QString(), Qt::FindDirectChildrenOnly));
+    m_sensorVal.clear();
+    m_sensorVal.resize(m_meas.size());
+
+    auto *col = qobject_cast<QVBoxLayout *>(m_sensorsPage->layout());
+    if (!col)
+        return;
+
+    for (int g = 0; g < kGroupCount; ++g) {
+        auto *box  = new QGroupBox(QString::fromLatin1(kSensorGroups[g].title));
+        auto *form = new QFormLayout(box);
+        int rows = 0;
+
+        for (int i = 0; i < m_meas.size(); ++i) {
+            const A2lMeas &mm = m_meas[i];
+            // The individual diagnostics bits have their own tab; showing ~20
+            // of them here would bury the actual sensor readings.
+            if (mm.isBitMask || groupOf(mm.name) != g)
+                continue;
+
+            auto *val = new QLabel("-");
+            val->setToolTip(mm.desc);
+            m_sensorVal[i] = val;
+            QLabel *key = new QLabel(mm.name + ":");
+            key->setToolTip(mm.desc);
+            form->addRow(key, val);
+            ++rows;
+        }
+
+        if (rows > 0)
+            col->addWidget(box);
+        else
+            delete box;
+    }
+    col->addStretch(1);
+
+    m_sensorsStatus->setText(m_meas.isEmpty()
+        ? QStringLiteral("No A2L loaded - use \"Load A2L...\" on the Calibration tab")
+        : QStringLiteral("%1 signals from %2")
+              .arg(m_meas.size()).arg(QDir::toNativeSeparators(m_a2lPath)));
+}
+
+void XcpPanel::updateSensorValues(const XcpClient::Measurements &m)
+{
+    if (m.raw.isEmpty())
+        return;
+
+    for (int i = 0; i < m_meas.size() && i < m_sensorVal.size(); ++i) {
+        QLabel *lbl = m_sensorVal[i];
+        if (!lbl)
+            continue;
+
+        double v = 0.0;
+        if (!decode(m.raw, m_meas[i], &v)) {
+            lbl->setText("-");
+            continue;
+        }
+
+        // Integers print without a decimal point; floats get 3 digits, which
+        // is enough for rad and g without turning into noise.
+        const bool isInt = (m_meas[i].type != A2lType::Float32);
+        QString text = isInt ? QString::number(qint64(v))
+                             : QString::number(v, 'f', 3);
+        if (!m_meas[i].unit.isEmpty())
+            text += QLatin1Char(' ') + m_meas[i].unit;
+
+        // Angles are the reason this tab exists; show degrees alongside rad,
+        // because nobody eyeballs attitude in radians.
+        if (m_meas[i].unit == QLatin1String("rad"))
+            text += QStringLiteral("  (%1 deg)").arg(v * 180.0 / M_PI, 0, 'f', 2);
+
+        lbl->setText(text);
+    }
 }
 
 QWidget *XcpPanel::buildDiagTab()
@@ -431,10 +581,19 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
         QSettings settings;
         settings.setValue("a2lPath", path);
     }
+    // Same file also drives the Sensors tab (MEASUREMENT list). A failure here
+    // is not fatal: the calibration side has already loaded fine.
+    QString measErr;
+    const QVector<A2lMeas> meas = A2lModel::parseMeasurements(path, &measErr);
+    if (!meas.isEmpty())
+        m_meas = meas;
+
     if (m_log)
-        m_log->appendPlainText(QString("[A2L loaded: %1 characteristics from %2]")
-                                   .arg(m_chars.size()).arg(path));
+        m_log->appendPlainText(QString("[A2L loaded: %1 characteristics, %2 measurements from %3]")
+                                   .arg(m_chars.size()).arg(m_meas.size()).arg(path));
     rebuildCalTable();
+    rebuildSensorsTab();
+    rebuildPlotSeries();
 }
 
 void XcpPanel::loadA2lFile()
@@ -501,36 +660,84 @@ QWidget *XcpPanel::buildNvmTab()
     return tab;
 }
 
+
+// Build the plot series and the log channel list from the A2L MEASUREMENT
+// list. Called whenever an A2L is loaded, so a signal added to the firmware
+// description becomes plottable and loggable with no GUI change.
+void XcpPanel::rebuildPlotSeries()
+{
+    if (!m_plot || !m_plotChkHost)
+        return;
+
+    // Only a handful are on by default: 56 overlaid traces on one autoscaled
+    // axis is unreadable, and mixing rad with g and Pa makes it worse.
+    static const QSet<QString> kDefaultOn = {
+        "DieTemp_DTS", "DieTemp_DTSC",
+        "ImuAccelX", "ImuAccelY", "ImuAccelZ",
+        "AhrsRoll", "AhrsPitch",
+    };
+
+    qDeleteAll(m_plotChk);
+    m_plotChk.clear();
+    m_series.clear();
+    m_signalIdx.clear();
+    m_plot->clearSeries();
+
+    auto *row = qobject_cast<QHBoxLayout *>(m_plotChkHost->layout());
+    if (!row)
+        return;
+    while (QLayoutItem *it = row->takeAt(0))
+        delete it;
+
+    for (int i = 0; i < m_meas.size(); ++i) {
+        const A2lMeas &mm = m_meas[i];
+        if (mm.isBitMask)
+            continue;               // diagnostics bits have their own tab
+
+        // Distinct hue per series, evenly spaced so neighbours stay separable.
+        const int    n     = m_signalIdx.size();
+        const QColor color = QColor::fromHsv((n * 47) % 360, 200, 200);
+        const QString label = mm.unit.isEmpty()
+                                  ? mm.name
+                                  : QString("%1 [%2]").arg(mm.name, mm.unit);
+        const bool on = kDefaultOn.contains(mm.name);
+
+        const int sid = m_plot->addSeries(label, color);
+        auto *chk = new QCheckBox(label);
+        chk->setToolTip(mm.desc);
+        chk->setChecked(on);
+        m_plot->setSeriesVisible(sid, on);
+
+        const int slot = n;
+        connect(chk, &QCheckBox::toggled, this, [this, slot](bool vis) {
+            if (slot < m_series.size())
+                m_plot->setSeriesVisible(m_series[slot], vis);
+        });
+
+        row->addWidget(chk);
+        m_plotChk.append(chk);
+        m_series.append(sid);
+        m_signalIdx.append(i);
+    }
+    row->addStretch(1);
+}
+
 QWidget *XcpPanel::buildPlotTab()
 {
     m_plot = new PlotWidget;
-    // Pressure (~956 hPa) shares the common autoscaled y-axis, so it is default
-    // off like the volts — toggle it on its own for a readable trend; baro temp
-    // overlays the die temps (same scale).
-    const struct { const char *name; QColor color; bool on; } defs[8] = {
-        {"DTS [°C]",     QColor(200, 60, 60),  true},
-        {"DTSC [°C]",    QColor(230, 140, 40), true},
-        {"VDD [V]",      QColor(60, 120, 200), false},
-        {"VDDP3 [V]",    QColor(60, 180, 90),  false},
-        {"VEXT [V]",     QColor(140, 80, 200), false},
-        {"Baro P [hPa]", QColor(0, 160, 160),  false},
-        {"Baro T [°C]",  QColor(170, 40, 120), false},
-        {"Baro alt [m]", QColor(90, 90, 90),   false},
-    };
+
+    // The selectable series live in a scrollable strip: the A2L describes ~56
+    // signals, far more than fit in one row of checkboxes.
+    m_plotChkHost = new QWidget;
+    new QHBoxLayout(m_plotChkHost);
+    auto *chkScroll = new QScrollArea;
+    chkScroll->setWidgetResizable(true);
+    chkScroll->setFixedHeight(64);
+    chkScroll->setWidget(m_plotChkHost);
+    rebuildPlotSeries();
 
     auto *chkRow = new QHBoxLayout;
-    for (int i = 0; i < 8; ++i) {
-        m_series[i]  = m_plot->addSeries(QString::fromUtf8(defs[i].name), defs[i].color);
-        m_plotChk[i] = new QCheckBox(QString::fromUtf8(defs[i].name));
-        m_plotChk[i]->setChecked(defs[i].on);
-        m_plot->setSeriesVisible(m_series[i], defs[i].on);
-        const int idx = i;
-        connect(m_plotChk[i], &QCheckBox::toggled, this, [this, idx](bool on) {
-            m_plot->setSeriesVisible(m_series[idx], on);
-        });
-        chkRow->addWidget(m_plotChk[i]);
-    }
-    chkRow->addStretch(1);
+    chkRow->addWidget(chkScroll, 1);
 
     m_logStartBtn = new QPushButton("Start Log");
     m_logStopBtn  = new QPushButton("Stop Log");
@@ -580,7 +787,7 @@ void XcpPanel::onConnected(const QString &ident)
     m_pollTimer->start();
     readCalibration();                          // populate the calibration tab
     m_client->pollMeasurements(XCP_DATA_ADDR);  // one poll: version + magic
-    m_client->startDaq(XCP_DATA_ADDR + 8, 44);  // then event-driven streaming
+    m_client->startDaq(XCP_DATA_ADDR);          // then event-driven streaming (2 ODTs)
 }
 
 void XcpPanel::onDaqStarted()
@@ -602,6 +809,9 @@ void XcpPanel::onDisconnected()
 
 void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
 {
+    emit measurementsUpdated(m);   // permanent footer (core load / Ethernet)
+    updateSensorValues(m);         // A2L-driven Sensors tab
+
     if (!m.valid) {
         m_log->appendPlainText("[Warning: magic word mismatch - firmware incompatible with this GUI?]");
         return;
@@ -633,28 +843,50 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
         m_baroAltLbl->setText("n/a");
     }
 
+    if (m.imuPresent) {
+        m_imuAccelLbl->setText(QString("%1, %2, %3 g")
+                                   .arg(double(m.accelX), 0, 'f', 2)
+                                   .arg(double(m.accelY), 0, 'f', 2)
+                                   .arg(double(m.accelZ), 0, 'f', 2));
+        m_imuGyroLbl->setText(QString("%1, %2, %3 °/s")
+                                  .arg(double(m.gyroX), 0, 'f', 1)
+                                  .arg(double(m.gyroY), 0, 'f', 1)
+                                  .arg(double(m.gyroZ), 0, 'f', 1));
+        m_imuTempLbl->setText(QString::number(double(m.imuTempC), 'f', 1) + " °C");
+    } else {
+        m_imuAccelLbl->setText("n/a (not detected)");
+        m_imuGyroLbl->setText("n/a");
+        m_imuTempLbl->setText("n/a");
+    }
+
     updateDiagTable(m.diagStatus);
 
     // plot + logging feed
     const double t = double(m_timeBase.elapsed()) / 1000.0;
     m_lastDaqMs = m_timeBase.elapsed();
-    m_plot->appendPoint(m_series[0], t, double(m.dieTempC));
-    m_plot->appendPoint(m_series[1], t, double(m.dtscTempC));
-    m_plot->appendPoint(m_series[2], t, double(m.vddCore));
-    m_plot->appendPoint(m_series[3], t, double(m.vddp3));
-    m_plot->appendPoint(m_series[4], t, double(m.vext));
-    if (m.baroPresent) {
-        m_plot->appendPoint(m_series[5], t, double(m.baroPressPa) / 100.0);  // hPa
-        m_plot->appendPoint(m_series[6], t, double(m.baroTempC));
-        m_plot->appendPoint(m_series[7], t, double(m.baroAltM));
+    // One appendPoint per A2L-derived series, decoded from the raw block.
+    // Signals belonging to a sensor that is not present would otherwise plot a
+    // flat zero line, so they are skipped rather than drawn as data.
+    for (int k = 0; k < m_signalIdx.size() && k < m_series.size(); ++k) {
+        const A2lMeas &mm = m_meas[m_signalIdx[k]];
+        if (!m.baroPresent && mm.name.startsWith("Baro"))
+            continue;
+        if (!m.imuPresent && (mm.name.startsWith("Imu") || mm.name.startsWith("Ahrs")))
+            continue;
+        double v = 0.0;
+        if (decode(m.raw, mm, &v))
+            m_plot->appendPoint(m_series[k], t, v);
     }
 
     if (m_logging) {
-        const auto &chans = logChannels();
         QVector<double> values;
         values.reserve(m_logSel.size());
-        for (int idx : m_logSel)
-            values.append(chans[idx].get(m));
+        for (int idx : m_logSel) {
+            double v = 0.0;
+            if (idx >= 0 && idx < m_signalIdx.size())
+                (void)decode(m.raw, m_meas[m_signalIdx[idx]], &v);
+            values.append(v);
+        }
         m_mf4.append(double(m_timeBase.elapsed() - m_logStartMs) / 1000.0, values);
         updateLogStatus();
     }
@@ -662,26 +894,34 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
 
 // Modal picker shown before each logging session. Returns false if the user
 // cancelled or left everything unchecked; otherwise fills *out with the chosen
-// channel indices (into logChannels()).
+// channel indices (into m_signalIdx, i.e. the A2L MEASUREMENT list).
 bool XcpPanel::chooseLogChannels(QVector<int> *out)
 {
-    const auto &chans = logChannels();
 
     QDialog dlg(this);
     dlg.setWindowTitle("Select channels to log");
     auto *v = new QVBoxLayout(&dlg);
     v->addWidget(new QLabel("Choose which measurement values to record:"));
 
+    // The A2L describes ~56 signals, so the picker scrolls.
+    auto *listHost = new QWidget;
+    auto *listCol  = new QVBoxLayout(listHost);
     QVector<QCheckBox *> boxes;
-    for (int i = 0; i < chans.size(); ++i) {
-        auto *cb = new QCheckBox(chans[i].name
-                                 + (chans[i].unit.isEmpty() ? QString()
-                                                            : " [" + chans[i].unit + "]"));
+    for (int i = 0; i < m_signalIdx.size(); ++i) {
+        const A2lMeas &mm = m_meas[m_signalIdx[i]];
+        auto *cb = new QCheckBox(mm.name
+                                 + (mm.unit.isEmpty() ? QString() : " [" + mm.unit + "]"));
+        cb->setToolTip(mm.desc);
         // default: all on for the first session, else remember the last choice
         cb->setChecked(m_logSel.isEmpty() ? true : m_logSel.contains(i));
         boxes.append(cb);
-        v->addWidget(cb);
+        listCol->addWidget(cb);
     }
+    auto *listScroll = new QScrollArea;
+    listScroll->setWidgetResizable(true);
+    listScroll->setWidget(listHost);
+    listScroll->setMinimumHeight(400);
+    v->addWidget(listScroll, 1);
 
     auto *selAllBtn = new QPushButton("Select all");
     connect(selAllBtn, &QPushButton::clicked, &dlg, [&boxes]() {
@@ -717,11 +957,12 @@ void XcpPanel::startLogging()
     }
     m_logSel = sel;
 
-    const auto &chans = logChannels();
     QVector<Mf4Writer::Channel> cfg;
     cfg.reserve(sel.size());
-    for (int idx : sel)
-        cfg.append({chans[idx].name, chans[idx].unit, chans[idx].isFloat});
+    for (int idx : sel) {
+        const A2lMeas &mm = m_meas[m_signalIdx[idx]];
+        cfg.append({mm.name, mm.unit, mm.type == A2lType::Float32});
+    }
     m_mf4.begin(cfg);
 
     m_logStartMs = m_timeBase.elapsed();
@@ -1133,6 +1374,9 @@ void XcpPanel::setConnectedState(bool connected)
         m_baroPressLbl->setText("-");
         m_baroTempLbl->setText("-");
         m_baroAltLbl->setText("-");
+        m_imuAccelLbl->setText("-");
+        m_imuGyroLbl->setText("-");
+        m_imuTempLbl->setText("-");
         m_identLbl->setText("-");
         m_diagSummary->setText("Not connected");
         m_diagSummary->setStyleSheet("");

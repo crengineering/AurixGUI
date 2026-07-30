@@ -28,6 +28,8 @@ add_executable(SerialMonitor
     plotwidget.h
     mf4writer.cpp
     mf4writer.h
+    systemfooter.cpp
+    systemfooter.h
 )
 
 target_link_libraries(SerialMonitor PRIVATE

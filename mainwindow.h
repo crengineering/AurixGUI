@@ -13,6 +13,7 @@ class QComboBox;
 class QPushButton;
 class QPlainTextEdit;
 class QTabWidget;
+class SystemFooter;
 class QTimer;
 
 // Result of one background port scan (worker thread, see scanPortsWorker).
@@ -52,6 +53,7 @@ private:
     QTimer         *m_autoConnectTimer = nullptr;
     QTimer         *m_heartbeatTimer   = nullptr;   // 500 ms 'H' for diag bit 11
     QTabWidget     *m_tabs             = nullptr;   // main tabs (lamp icons)
+    SystemFooter   *m_footer           = nullptr;   // permanent core/Ethernet strip
     bool            m_autoConnect      = true;
 
     QFutureWatcher<PortScan> m_scanWatcher;         // background port scan

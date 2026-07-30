@@ -32,6 +32,43 @@ public:
         float   baroTempC   = 0.0f; // BMP388 temperature [degC]
         float   baroAltM    = 0.0f; // pressure altitude [m]
         bool    baroPresent = false;// BMP388 answered at init
+        float   accelX      = 0.0f; // MPU-6050 acceleration [g]
+        float   accelY      = 0.0f;
+        float   accelZ      = 0.0f;
+        float   gyroX       = 0.0f; // MPU-6050 angular rate [deg/s]
+        float   gyroY       = 0.0f;
+        float   gyroZ       = 0.0f;
+        float   imuTempC    = 0.0f; // MPU-6050 die temperature [degC]
+        bool    imuPresent  = false;// MPU-6050 answered at init
+
+        // attitude estimate (Ahrs.c) - flight_ctrl.h conventions
+        quint8  ahrsState   = 0;    // 0 calibrating, 1 running, 2 no sensor
+        bool    ahrsAccOk   = false;// |a| ~= 1 g, accel being trusted
+        float   roll        = 0.0f; // phi   [rad]
+        float   pitch       = 0.0f; // theta [rad]
+        float   yaw         = 0.0f; // psi   [rad], drifts (gyro-only)
+        float   rateP       = 0.0f; // p [rad/s]
+        float   rateQ       = 0.0f; // q [rad/s]
+        float   rateR       = 0.0f; // r [rad/s]
+        float   biasX       = 0.0f; // measured gyro bias [deg/s]
+        float   biasY       = 0.0f;
+        float   biasZ       = 0.0f;
+
+        // per-core execution time (CoreStats.c)
+        quint32 coreExecUs[6]   = {0,0,0,0,0,0};  // busy time per 100 ms [us]
+        quint16 coreLoadPmil[6] = {0,0,0,0,0,0};  // per mille of the window
+        quint16 coreAlive[6]    = {0,0,0,0,0,0};  // frozen => core hung
+
+        // Ethernet (EthStats.c)
+        quint32 ethBytesPerSec = 0;
+        quint16 ethUtilPmil    = 0; // 0..1000
+        quint16 ethLinkMbits   = 0; // 10 / 100 / 1000
+
+        // Raw copy of Xcp_Data, so anything described in the A2L can be
+        // decoded generically by (ECU_ADDRESS - XCP_DATA_ADDR) without the
+        // client needing a named field for it. Empty until the first poll.
+        QByteArray raw;
+
         bool    valid      = false; // magic word matched
     };
 
@@ -46,9 +83,11 @@ public:
     void writeMemory(quint32 address, const QByteArray &data); // -> memoryWritten()
 
     // Configure and start the DAQ list (event channel 0, 100 ms on the
-    // board): one ODT entry covering tick..diagStatus. Measurements then
-    // arrive event-driven via measurementsReceived() without polling.
-    void startDaq(quint32 entryAddress, quint8 entrySize);
+    // board). The 84-byte Xcp_Data block exceeds the 63-byte MAX_DTO, so it is
+    // split across two ODTs: ODT0 = tick..baroAlt (44 B @ base+8), ODT1 = the
+    // IMU sub-block (32 B @ base+52). Measurements then arrive event-driven via
+    // measurementsReceived() without polling. Pass the block base address.
+    void startDaq(quint32 baseAddress);
     bool daqActive() const { return m_daqActive; }
 
 signals:
@@ -66,8 +105,8 @@ private slots:
     void onTimeout();
 
 private:
-    enum class ReqType { Connect, GetId, UploadId, Poll, MemRead, MemWrite,
-                         DaqCmd, DaqStart };
+    enum class ReqType { Connect, GetId, UploadId, Poll, PollImu, PollAhrs, PollSys,
+                         MemRead, MemWrite, DaqCmd, DaqStart };
     struct Request {
         ReqType    type;
         QByteArray packet;
@@ -78,6 +117,10 @@ private:
     void sendNext();
     void handleResponse(const QByteArray &packet);
     void handleDaqFrame(const QByteArray &packet);
+    void parseImu(const char *d);   // fill m_accum IMU fields from a 32-byte block
+    void parseAhrs(const char *d);  // fill m_accum attitude fields (40-byte block)
+    void parseSys(const char *d);   // fill m_accum core/Ethernet stats (56-byte block)
+    void storeRaw(int offset, const char *d, int len);  // mirror into m_accum.raw
     void dropConnection(const QString &reason);
 
     QUdpSocket     *m_socket  = nullptr;
@@ -95,6 +138,9 @@ private:
     quint8          m_verMinor  = 0;    // frames do not carry the version
     quint8          m_verStep   = 0;
     bool            m_verValid  = false;
+    // Running measurement state assembled across the two poll chunks / two DAQ
+    // ODTs before a single measurementsReceived() is emitted.
+    Measurements    m_accum;
 };
 
 #endif // XCPCLIENT_H

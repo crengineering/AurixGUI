@@ -4,6 +4,8 @@
 
 #include <QCheckBox>
 #include <QTabWidget>
+#include <QVBoxLayout>
+#include "systemfooter.h"
 #include <QComboBox>
 #include <QPushButton>
 #include <QPlainTextEdit>
@@ -101,12 +103,26 @@ MainWindow::MainWindow(QWidget *parent)
     m_tabs = new QTabWidget;
     m_tabs->addTab(uartTab, lampIcon(LampColor::Red), "UART");
     m_tabs->addTab(xcpPanel, lampIcon(LampColor::Red), "Ethernet");
-    setCentralWidget(m_tabs);
+    // Tabs on top, permanent status strip underneath. The footer is deliberately
+    // outside the tab widget so core load and link utilisation stay visible no
+    // matter which tab is in front.
+    m_footer = new SystemFooter;
+
+    auto *centralWrap = new QWidget;
+    auto *centralCol  = new QVBoxLayout(centralWrap);
+    centralCol->setContentsMargins(0, 0, 0, 0);
+    centralCol->setSpacing(0);
+    centralCol->addWidget(m_tabs, 1);
+    centralCol->addWidget(m_footer, 0);
+    setCentralWidget(centralWrap);
 
     connect(xcpPanel, &XcpPanel::connectionChanged, this, [this](bool connected) {
         m_tabs->setTabIcon(1, lampIcon(connected ? LampColor::Green
                                                  : LampColor::Red));
+        m_footer->setConnected(connected);
     });
+    connect(xcpPanel, &XcpPanel::measurementsUpdated,
+            m_footer, &SystemFooter::update);
 
     // ---- Signals/Slots ----
     connect(m_refreshBtn, &QPushButton::clicked,    this, &MainWindow::refreshPorts);

@@ -53,6 +53,12 @@ void PlotWidget::clearData()
     update();
 }
 
+void PlotWidget::clearSeries()
+{
+    m_series.clear();
+    update();
+}
+
 void PlotWidget::paintEvent(QPaintEvent *event)
 {
     Q_UNUSED(event);

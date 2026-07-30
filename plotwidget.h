@@ -18,6 +18,7 @@ public:
     void appendPoint(int series, double t, double value);   // t in seconds
     void setSeriesVisible(int series, bool visible);
     void clearData();
+    void clearSeries();      // drop all series (used when the A2L is reloaded)
 
 protected:
     void paintEvent(QPaintEvent *event) override;
