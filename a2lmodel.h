@@ -46,6 +46,7 @@ struct A2lMeas {
     double  lo   = 0.0;
     double  hi   = 0.0;
     bool    isBitMask = false;  // BIT_MASK view (a single diagnostics bit)
+    quint32 bitMask   = 0;      // the mask itself, when isBitMask
 };
 
 class A2lModel {

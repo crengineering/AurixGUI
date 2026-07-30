@@ -19,6 +19,7 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QFormLayout>
+#include <algorithm>
 #include <cmath>
 #include <QScrollArea>
 #include <QGroupBox>
@@ -63,7 +64,9 @@ constexpr NvmParam NVM_PARAMS[] = {
 };
 constexpr int NVM_VALUES = int(sizeof(NVM_PARAMS) / sizeof(NVM_PARAMS[0]));
 
-// diagStatus bits, must match DIAGNOSTICS.md
+// Fallback diagStatus bits, used only when no A2L is loaded. The live table is
+// built from the A2L BIT_MASK measurements (see rebuildDiagTable), so firmware
+// gaining a diagnostic bit needs no change here.
 struct DiagBit { int bit; const char *text; };
 constexpr DiagBit DIAG_BITS[] = {
     {0,  "DTS temperature too low (PMS sensor)"},
@@ -82,7 +85,6 @@ constexpr DiagBit DIAG_BITS[] = {
     {31, "Calibration block invalid - defaults reloaded"},
 };
 constexpr int DIAG_ROWS = int(sizeof(DIAG_BITS) / sizeof(DIAG_BITS[0]));
-constexpr int DIAG_TAB_INDEX = 1;   // "Diagnostics" position in the sub-tabs
 
 // Master list of channels the user can log to MF4. Each carries an accessor
 // from a received measurement frame; isFloat=false selects a uint32 column
@@ -171,7 +173,7 @@ XcpPanel::XcpPanel(QWidget *parent)
     m_subTabs = new QTabWidget;
     m_subTabs->addTab(buildLiveTab(), "Live Data");
     m_subTabs->addTab(buildSensorsTab(), "Sensors");
-    m_subTabs->addTab(buildDiagTab(), "Diagnostics");
+    m_diagTabIndex = m_subTabs->addTab(buildDiagTab(), "Diagnostics");
     m_subTabs->addTab(buildCalTab(),  "Calibration");
     m_subTabs->addTab(buildNvmTab(),  "DFLASH");
     m_subTabs->addTab(buildPlotTab(), "Plot && Log");
@@ -390,6 +392,47 @@ void XcpPanel::updateSensorValues(const XcpClient::Measurements &m)
     }
 }
 
+
+// Build the diagnostics table from the A2L: every MEASUREMENT that is a
+// BIT_MASK view on diagStatus becomes a row, with the A2L description as its
+// text. Falls back to the built-in list when no A2L is loaded.
+//
+// This used to be a hardcoded array, which silently stopped at bit 12 when the
+// firmware grew the peripheral-fault bits: the new diagnostics existed on the
+// target and were simply invisible here.
+void XcpPanel::rebuildDiagTable()
+{
+    m_diagRows.clear();
+
+    for (const A2lMeas &mm : m_meas) {
+        if (!mm.isBitMask || mm.addr != (XCP_DATA_ADDR + 0x24u) || mm.bitMask == 0)
+            continue;
+        // BIT_MASK carries the mask; the row needs the bit position.
+        int bit = 0;
+        while (bit < 31 && ((mm.bitMask >> bit) & 1u) == 0u)
+            ++bit;
+        m_diagRows.append({bit, mm.desc.isEmpty() ? mm.name : mm.desc});
+    }
+
+    std::sort(m_diagRows.begin(), m_diagRows.end(),
+              [](const DiagRow &a, const DiagRow &b) { return a.bit < b.bit; });
+
+    if (m_diagRows.isEmpty())
+        for (const DiagBit &d : DIAG_BITS)
+            m_diagRows.append({d.bit, QString::fromUtf8(d.text)});
+
+    if (!m_diagTable)
+        return;
+
+    m_diagTable->setRowCount(m_diagRows.size());
+    for (int i = 0; i < m_diagRows.size(); ++i) {
+        m_diagTable->setItem(i, 0, new QTableWidgetItem(QString::number(m_diagRows[i].bit)));
+        m_diagTable->setItem(i, 1, new QTableWidgetItem(m_diagRows[i].text));
+        m_diagTable->setItem(i, 2, new QTableWidgetItem("-"));
+    }
+    m_haveStatus = false;        // force a repaint of the Status column
+}
+
 QWidget *XcpPanel::buildDiagTab()
 {
     m_diagWordLbl = new QLabel("diagStatus: -");
@@ -407,16 +450,12 @@ QWidget *XcpPanel::buildDiagTab()
     m_diagLamp = new QLabel;
     m_diagLamp->setPixmap(lampPixmap(LampColor::Gray, 18));
 
-    m_diagTable = new QTableWidget(DIAG_ROWS, 3);
+    m_diagTable = new QTableWidget(0, 3);
     m_diagTable->setHorizontalHeaderLabels({"Bit", "Meaning", "Status"});
     m_diagTable->verticalHeader()->setVisible(false);
     m_diagTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_diagTable->setSelectionMode(QAbstractItemView::NoSelection);
-    for (int i = 0; i < DIAG_ROWS; ++i) {
-        m_diagTable->setItem(i, 0, new QTableWidgetItem(QString::number(DIAG_BITS[i].bit)));
-        m_diagTable->setItem(i, 1, new QTableWidgetItem(QString::fromUtf8(DIAG_BITS[i].text)));
-        m_diagTable->setItem(i, 2, new QTableWidgetItem("-"));
-    }
+    rebuildDiagTable();
     m_diagTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
 
     auto *summaryRow = new QHBoxLayout;
@@ -584,6 +623,7 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
 
     rebuildCalTable();
     rebuildSensorsTab();
+    rebuildDiagTable();
     for (PlotPane *pane : m_plotPanes)
         pane->setAvailable(m_meas);
 }
@@ -995,18 +1035,21 @@ void XcpPanel::updateDiagTable(quint32 status)
         m_diagSummary->setStyleSheet("color: red;");
     }
 
-    for (int i = 0; i < DIAG_ROWS; ++i) {
-        const bool active = (status >> DIAG_BITS[i].bit) & 1u;
+    for (int i = 0; i < m_diagRows.size(); ++i) {
+        const int  bit    = m_diagRows[i].bit;
+        const bool active = ((status >> bit) & 1u) != 0u;
         QTableWidgetItem *item = m_diagTable->item(i, 2);
+        if (!item)
+            continue;
         item->setText(active ? "ERROR" : "OK");
         item->setForeground(active ? QBrush(Qt::red) : QBrush(Qt::darkGreen));
 
         // log newly appearing problems with their plain-text meaning
-        const bool wasActive = m_haveStatus && ((m_lastStatus >> DIAG_BITS[i].bit) & 1u);
+        const bool wasActive = m_haveStatus && (((m_lastStatus >> bit) & 1u) != 0u);
         if (active && !wasActive)
-            m_log->appendPlainText("[Diagnostic: " + QString::fromUtf8(DIAG_BITS[i].text) + "]");
+            m_log->appendPlainText("[Diagnostic: " + m_diagRows[i].text + "]");
         else if (!active && wasActive)
-            m_log->appendPlainText("[Diagnostic cleared: " + QString::fromUtf8(DIAG_BITS[i].text) + "]");
+            m_log->appendPlainText("[Diagnostic cleared: " + m_diagRows[i].text + "]");
     }
 
     m_lastStatus = status;
@@ -1024,7 +1067,10 @@ void XcpPanel::updateDiagLamp()
         color = (m_lastStatus == 0) ? LampColor::Green : LampColor::Red;
 
     m_diagLamp->setPixmap(lampPixmap(color, 18));
-    m_subTabs->setTabIcon(DIAG_TAB_INDEX, lampIcon(color));
+    // Look the tab up rather than hardcoding its position: inserting the
+    // Sensors tab shifted Diagnostics and the lamp went onto the wrong tab.
+    if (m_diagTabIndex >= 0)
+        m_subTabs->setTabIcon(m_diagTabIndex, lampIcon(color));
 }
 
 void XcpPanel::readCalibration()

@@ -112,6 +112,7 @@ private:
     void            writeCalRow(int row);
     void            loadA2l(const QString &path, bool remember);
     QWidget        *buildSensorsTab();
+    void            rebuildDiagTable();
     void            addPlotPane();
     void            relayoutPlots();
     void            rebuildSensorsTab();
@@ -125,6 +126,11 @@ private:
     // Sensors tab: built from the A2L MEASUREMENT list, grouped by name
     // prefix. m_sensorVal[i] is the value label for m_meas[i], so a new
     // MEASUREMENT in the A2L needs no GUI change at all.
+    // Diagnostics rows, built from the A2L BIT_MASK measurements.
+    struct DiagRow { int bit; QString text; };
+    QVector<DiagRow> m_diagRows;
+    int              m_diagTabIndex = -1;
+
     QVector<A2lMeas> m_meas;
     QVector<QLabel*> m_sensorVal;
     QWidget         *m_sensorsPage   = nullptr;

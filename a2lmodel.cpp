@@ -194,6 +194,8 @@ QVector<A2lMeas> A2lModel::parseMeasurements(const QString &path, QString *err)
                 m.unit = t[j + 1];
             } else if (tok == QLatin1String("BIT_MASK")) {
                 m.isBitMask = true;
+                if (j + 1 < t.size())
+                    m.bitMask = t[j + 1].toUInt(nullptr, 0);
             }
         }
 
