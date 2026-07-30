@@ -18,6 +18,8 @@ class QTabWidget;
 class QCheckBox;
 class QTimer;
 class PlotWidget;
+class PlotPane;
+class QGridLayout;
 
 // "Ethernet" tab: connects to the XCP slave on the TC399. Contains
 // three sub-tabs: live measurements, diagnostics interpretation (bitmask
@@ -38,6 +40,7 @@ private slots:
     void onConnected(const QString &ident);
     void onDisconnected();
     void onMeasurements(const XcpClient::Measurements &m);
+    void removePlotPane(PlotPane *pane);
     void onMemoryRead(quint32 address, const QByteArray &data);
     void onMemoryWritten(quint32 address);
     void onError(const QString &message);
@@ -109,7 +112,8 @@ private:
     void            writeCalRow(int row);
     void            loadA2l(const QString &path, bool remember);
     QWidget        *buildSensorsTab();
-    void            rebuildPlotSeries();
+    void            addPlotPane();
+    void            relayoutPlots();
     void            rebuildSensorsTab();
     void            updateSensorValues(const XcpClient::Measurements &m);
     void            rebuildCalTable();
@@ -154,10 +158,13 @@ private:
     // description. m_signalIdx maps a series/channel index to an entry in
     // m_meas; BIT_MASK diagnostics bits are excluded.
     QVector<int>     m_signalIdx;
-    PlotWidget     *m_plot        = nullptr;
-    QVector<QCheckBox *> m_plotChk;
-    QVector<int>         m_series;
-    QWidget             *m_plotChkHost = nullptr;
+    // Plot & Log: a user-built set of plots, two per row. Each PlotPane owns
+    // its own signal selection and series; none exist until "Add plot".
+    QVector<PlotPane *>  m_plotPanes;
+    QWidget             *m_plotGridHost = nullptr;
+    QGridLayout         *m_plotGrid     = nullptr;
+    QPushButton         *m_addPlotBtn   = nullptr;
+    QLabel              *m_plotHint     = nullptr;
     QPushButton    *m_logStartBtn = nullptr;
     QPushButton    *m_logStopBtn  = nullptr;
     QPushButton    *m_logSaveBtn  = nullptr;

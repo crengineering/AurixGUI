@@ -2,6 +2,8 @@
 
 #include <QFile>
 #include <QHash>
+#include <QtEndian>
+#include <cstring>
 
 namespace {
 
@@ -203,4 +205,22 @@ QVector<A2lMeas> A2lModel::parseMeasurements(const QString &path, QString *err)
     if (out.isEmpty() && err && err->isEmpty())
         *err = QStringLiteral("no MEASUREMENT entries found");
     return out;
+}
+
+bool A2lModel::decode(const QByteArray &raw, quint32 blockBase,
+                      const A2lMeas &m, double *out)
+{
+    const int off = int(m.addr - blockBase);
+    const int len = a2lTypeSize(m.type);
+    if (off < 0 || raw.size() < off + len)
+        return false;
+
+    const char *d = raw.constData() + off;
+    switch (m.type) {
+    case A2lType::Float32: { float f = 0.0f; std::memcpy(&f, d, sizeof(f)); *out = double(f); break; }
+    case A2lType::Uint32:  *out = double(qFromLittleEndian<quint32>(d)); break;
+    case A2lType::Uint16:  *out = double(qFromLittleEndian<quint16>(d)); break;
+    case A2lType::Uint8:   *out = double(quint8(*d));                    break;
+    }
+    return true;
 }

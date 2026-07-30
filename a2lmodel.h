@@ -2,6 +2,7 @@
 #define A2LMODEL_H
 
 #include <QString>
+#include <QByteArray>
 #include <QVector>
 #include <QtGlobal>
 
@@ -57,6 +58,12 @@ public:
     // the firmware description instead of a hardcoded signal list: adding a
     // MEASUREMENT to the A2L is enough to make it appear in the GUI.
     static QVector<A2lMeas> parseMeasurements(const QString &path, QString *err = nullptr);
+
+    // Decode one measurement out of a raw copy of the firmware's measurement
+    // block. blockBase is the address the raw buffer starts at, so the offset
+    // is (m.addr - blockBase). Returns false if the buffer does not cover it.
+    static bool decode(const QByteArray &raw, quint32 blockBase,
+                       const A2lMeas &m, double *out);
 };
 
 #endif // A2LMODEL_H

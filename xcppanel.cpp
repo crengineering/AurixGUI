@@ -1,5 +1,7 @@
 #include "xcppanel.h"
 #include "plotwidget.h"
+#include "plotpane.h"
+#include <QGridLayout>
 #include "lampicon.h"
 
 #include <QCheckBox>
@@ -282,25 +284,6 @@ int groupOf(const QString &name)
     return 0;
 }
 
-// Decode one measurement from the raw block. Returns false if the block does
-// not cover it (e.g. nothing received yet).
-bool decode(const QByteArray &raw, const A2lMeas &m, double *out)
-{
-    const int off = int(m.addr - XCP_DATA_ADDR);
-    const int len = a2lTypeSize(m.type);
-    if (off < 0 || raw.size() < off + len)
-        return false;
-
-    const char *d = raw.constData() + off;
-    switch (m.type) {
-    case A2lType::Float32: { float f = 0.0f; std::memcpy(&f, d, sizeof(f)); *out = double(f); break; }
-    case A2lType::Uint32:  *out = double(qFromLittleEndian<quint32>(d)); break;
-    case A2lType::Uint16:  *out = double(qFromLittleEndian<quint16>(d)); break;
-    case A2lType::Uint8:   *out = double(quint8(*d));                    break;
-    }
-    return true;
-}
-
 } // namespace
 
 QWidget *XcpPanel::buildSensorsTab()
@@ -385,7 +368,7 @@ void XcpPanel::updateSensorValues(const XcpClient::Measurements &m)
             continue;
 
         double v = 0.0;
-        if (!decode(m.raw, m_meas[i], &v)) {
+        if (!A2lModel::decode(m.raw, XCP_DATA_ADDR, m_meas[i], &v)) {
             lbl->setText("-");
             continue;
         }
@@ -591,9 +574,18 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
     if (m_log)
         m_log->appendPlainText(QString("[A2L loaded: %1 characteristics, %2 measurements from %3]")
                                    .arg(m_chars.size()).arg(m_meas.size()).arg(path));
+    // Loggable signals: every MEASUREMENT except the diagnostics bits. The
+    // plots keep their own per-pane selection; this list only drives the MF4
+    // channel picker.
+    m_signalIdx.clear();
+    for (int i = 0; i < m_meas.size(); ++i)
+        if (!m_meas[i].isBitMask)
+            m_signalIdx.append(i);
+
     rebuildCalTable();
     rebuildSensorsTab();
-    rebuildPlotSeries();
+    for (PlotPane *pane : m_plotPanes)
+        pane->setAvailable(m_meas);
 }
 
 void XcpPanel::loadA2lFile()
@@ -661,83 +653,29 @@ QWidget *XcpPanel::buildNvmTab()
 }
 
 
-// Build the plot series and the log channel list from the A2L MEASUREMENT
-// list. Called whenever an A2L is loaded, so a signal added to the firmware
-// description becomes plottable and loggable with no GUI change.
-void XcpPanel::rebuildPlotSeries()
-{
-    if (!m_plot || !m_plotChkHost)
-        return;
-
-    // Only a handful are on by default: 56 overlaid traces on one autoscaled
-    // axis is unreadable, and mixing rad with g and Pa makes it worse.
-    static const QSet<QString> kDefaultOn = {
-        "DieTemp_DTS", "DieTemp_DTSC",
-        "ImuAccelX", "ImuAccelY", "ImuAccelZ",
-        "AhrsRoll", "AhrsPitch",
-    };
-
-    qDeleteAll(m_plotChk);
-    m_plotChk.clear();
-    m_series.clear();
-    m_signalIdx.clear();
-    m_plot->clearSeries();
-
-    auto *row = qobject_cast<QHBoxLayout *>(m_plotChkHost->layout());
-    if (!row)
-        return;
-    while (QLayoutItem *it = row->takeAt(0))
-        delete it;
-
-    for (int i = 0; i < m_meas.size(); ++i) {
-        const A2lMeas &mm = m_meas[i];
-        if (mm.isBitMask)
-            continue;               // diagnostics bits have their own tab
-
-        // Distinct hue per series, evenly spaced so neighbours stay separable.
-        const int    n     = m_signalIdx.size();
-        const QColor color = QColor::fromHsv((n * 47) % 360, 200, 200);
-        const QString label = mm.unit.isEmpty()
-                                  ? mm.name
-                                  : QString("%1 [%2]").arg(mm.name, mm.unit);
-        const bool on = kDefaultOn.contains(mm.name);
-
-        const int sid = m_plot->addSeries(label, color);
-        auto *chk = new QCheckBox(label);
-        chk->setToolTip(mm.desc);
-        chk->setChecked(on);
-        m_plot->setSeriesVisible(sid, on);
-
-        const int slot = n;
-        connect(chk, &QCheckBox::toggled, this, [this, slot](bool vis) {
-            if (slot < m_series.size())
-                m_plot->setSeriesVisible(m_series[slot], vis);
-        });
-
-        row->addWidget(chk);
-        m_plotChk.append(chk);
-        m_series.append(sid);
-        m_signalIdx.append(i);
-    }
-    row->addStretch(1);
-}
-
 QWidget *XcpPanel::buildPlotTab()
 {
-    m_plot = new PlotWidget;
+    // No plots exist at start-up: the user adds one and picks its signals.
+    // With ~56 signals in the A2L, anything shown by default is either noise
+    // or an arbitrary guess, and mixing rad with g and Pa on one autoscaled
+    // axis is unreadable. Panes are laid out two per row.
+    m_plotGridHost = new QWidget;
+    m_plotGrid     = new QGridLayout(m_plotGridHost);
+    m_plotGrid->setContentsMargins(0, 0, 0, 0);
 
-    // The selectable series live in a scrollable strip: the A2L describes ~56
-    // signals, far more than fit in one row of checkboxes.
-    m_plotChkHost = new QWidget;
-    new QHBoxLayout(m_plotChkHost);
-    auto *chkScroll = new QScrollArea;
-    chkScroll->setWidgetResizable(true);
-    chkScroll->setFixedHeight(64);
-    chkScroll->setWidget(m_plotChkHost);
-    rebuildPlotSeries();
+    auto *plotScroll = new QScrollArea;
+    plotScroll->setWidgetResizable(true);
+    plotScroll->setWidget(m_plotGridHost);
 
-    auto *chkRow = new QHBoxLayout;
-    chkRow->addWidget(chkScroll, 1);
+    m_addPlotBtn = new QPushButton("Add plot");
+    m_addPlotBtn->setToolTip("Create another plot and choose the signals it draws");
+    connect(m_addPlotBtn, &QPushButton::clicked, this, [this]() { addPlotPane(); });
+
+    m_plotHint = new QLabel("No plots yet - press \"Add plot\", then \"Signals...\" to choose what it draws.");
+
+    auto *topRow = new QHBoxLayout;
+    topRow->addWidget(m_addPlotBtn);
+    topRow->addWidget(m_plotHint, 1);
 
     m_logStartBtn = new QPushButton("Start Log");
     m_logStopBtn  = new QPushButton("Stop Log");
@@ -751,6 +689,7 @@ QWidget *XcpPanel::buildPlotTab()
     connect(m_logSaveBtn,  &QPushButton::clicked, this, &XcpPanel::saveLogging);
 
     auto *logRow = new QHBoxLayout;
+    logRow->addWidget(new QLabel("Log (independent of the plots):"));
     logRow->addWidget(m_logStartBtn);
     logRow->addWidget(m_logStopBtn);
     logRow->addWidget(m_logSaveBtn);
@@ -758,10 +697,45 @@ QWidget *XcpPanel::buildPlotTab()
 
     auto *tab    = new QWidget;
     auto *layout = new QVBoxLayout(tab);
-    layout->addLayout(chkRow);
-    layout->addWidget(m_plot, 1);
+    layout->addLayout(topRow);
+    layout->addWidget(plotScroll, 1);
     layout->addLayout(logRow);
     return tab;
+}
+
+// Append a pane and re-flow the grid two columns wide.
+void XcpPanel::addPlotPane()
+{
+    auto *pane = new PlotPane(m_plotPanes.size(), m_meas, m_plotGridHost);
+    connect(pane, &PlotPane::removeRequested, this, &XcpPanel::removePlotPane);
+    m_plotPanes.append(pane);
+    relayoutPlots();
+}
+
+void XcpPanel::removePlotPane(PlotPane *pane)
+{
+    const int i = m_plotPanes.indexOf(pane);
+    if (i < 0)
+        return;
+    m_plotPanes.remove(i);
+    m_plotGrid->removeWidget(pane);
+    pane->deleteLater();
+    relayoutPlots();
+}
+
+// Two plots per row, as wide as the tab allows.
+void XcpPanel::relayoutPlots()
+{
+    for (PlotPane *p : m_plotPanes)
+        m_plotGrid->removeWidget(p);
+
+    for (int i = 0; i < m_plotPanes.size(); ++i)
+        m_plotGrid->addWidget(m_plotPanes[i], i / 2, i % 2);
+
+    m_plotGrid->setColumnStretch(0, 1);
+    m_plotGrid->setColumnStretch(1, 1);
+    if (m_plotHint)
+        m_plotHint->setVisible(m_plotPanes.isEmpty());
 }
 
 void XcpPanel::toggleConnection()
@@ -782,7 +756,8 @@ void XcpPanel::onConnected(const QString &ident)
     m_log->appendPlainText("[Connected: " + m_identLbl->text() + "]");
     setConnectedState(true);
     m_timeBase.restart();
-    m_plot->clearData();
+    for (PlotPane *pane : m_plotPanes)
+        pane->clearData();
     m_lastDaqMs = 0;
     m_pollTimer->start();
     readCalibration();                          // populate the calibration tab
@@ -864,19 +839,8 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
     // plot + logging feed
     const double t = double(m_timeBase.elapsed()) / 1000.0;
     m_lastDaqMs = m_timeBase.elapsed();
-    // One appendPoint per A2L-derived series, decoded from the raw block.
-    // Signals belonging to a sensor that is not present would otherwise plot a
-    // flat zero line, so they are skipped rather than drawn as data.
-    for (int k = 0; k < m_signalIdx.size() && k < m_series.size(); ++k) {
-        const A2lMeas &mm = m_meas[m_signalIdx[k]];
-        if (!m.baroPresent && mm.name.startsWith("Baro"))
-            continue;
-        if (!m.imuPresent && (mm.name.startsWith("Imu") || mm.name.startsWith("Ahrs")))
-            continue;
-        double v = 0.0;
-        if (decode(m.raw, mm, &v))
-            m_plot->appendPoint(m_series[k], t, v);
-    }
+    for (PlotPane *pane : m_plotPanes)
+        pane->append(t, m.raw, m.baroPresent, m.imuPresent);
 
     if (m_logging) {
         QVector<double> values;
@@ -884,7 +848,7 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
         for (int idx : m_logSel) {
             double v = 0.0;
             if (idx >= 0 && idx < m_signalIdx.size())
-                (void)decode(m.raw, m_meas[m_signalIdx[idx]], &v);
+                (void)A2lModel::decode(m.raw, XCP_DATA_ADDR, m_meas[m_signalIdx[idx]], &v);
             values.append(v);
         }
         m_mf4.append(double(m_timeBase.elapsed() - m_logStartMs) / 1000.0, values);
