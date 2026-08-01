@@ -30,8 +30,12 @@ constexpr int     XCP_IMU_SIZE   = 32;          // imuPresent(+pad) + 7 floats
 constexpr int     XCP_AHRS_OFFSET = 84;         // attitude sub-block at 0x54
 constexpr int     XCP_AHRS_SIZE   = 40;         // state/accOk(+pad) + 9 floats
 constexpr int     XCP_SYS_OFFSET  = 124;        // core + Ethernet stats at 0x7C
-constexpr int     XCP_BLOCK_SIZE  = 180;        // full Xcp_Data (Measurements.h)
 constexpr int     XCP_SYS_SIZE    = 56;         // 6*u32 + 6*u16 + 6*u16 + u32 + 2*u16
+constexpr int     XCP_MAG_OFFSET  = 180;        // magnetometer sub-block at 0xB4
+constexpr int     XCP_MAG_SIZE    = 24;         // magPresent(+pad) + 5 floats
+constexpr int     XCP_BLOCK_SIZE  = 204;        // full Xcp_Data (Measurements.h)
+                                                // grew 180 -> 204 with the
+                                                // MMC5983MA block in fw v1.15.0
 constexpr int     TIMEOUT_MS     = 500;
 }
 
@@ -168,11 +172,12 @@ void XcpClient::startDaq(quint32 baseAddress)
     // the firmware allows XCP_DAQ_MAX_ODTS = 4, so 44/32/40/56 fits exactly.
     simple({CMD_FREE_DAQ});
     simple({CMD_ALLOC_DAQ, 0x00, 0x01, 0x00});                   // 1 list
-    simple({CMD_ALLOC_ODT, 0x00, 0x00, 0x00, 0x04});            // 4 ODTs
+    simple({CMD_ALLOC_ODT, 0x00, 0x00, 0x00, 0x05});            // 5 ODTs
     simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x00, 0x01});// ODT0: 1 entry
     simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x01, 0x01});// ODT1: 1 entry
     simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x02, 0x01});// ODT2: 1 entry
     simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x03, 0x01});// ODT3: 1 entry
+    simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x04, 0x01});// ODT4: 1 entry
 
     // ODT0 = core+baro (tick..baroAlt), 44 bytes at base+8
     simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, 0x00, 0x00});
@@ -186,6 +191,9 @@ void XcpClient::startDaq(quint32 baseAddress)
     // ODT3 = core load + Ethernet, 56 bytes at base+124
     simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, 0x03, 0x00});
     writeDaq(XCP_SYS_SIZE, baseAddress + XCP_SYS_OFFSET);
+    // ODT4 = magnetometer, 24 bytes at base+180 (MMC5983MA, fw >= v1.15.0)
+    simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, 0x04, 0x00});
+    writeDaq(XCP_MAG_SIZE, baseAddress + XCP_MAG_OFFSET);
 
     simple({CMD_SET_DAQ_MODE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00});
     enqueue({ReqType::DaqStart, QByteArray("\xDE\x01\x00\x00", 4), 0});
@@ -359,6 +367,14 @@ void XcpClient::handleDaqFrame(const QByteArray &packet)
             return;
         parseSys(d);
         storeRaw(XCP_SYS_OFFSET, d, XCP_SYS_SIZE);
+    } else if (pid == 4) {
+        // ODT4: magnetometer (MMC5983MA, fw >= v1.15.0). Raw only -- every
+        // field is reached through the A2L, so no hand-written parse is
+        // needed. Missing this branch is what made the mag read a constant 0
+        // even after the ODT was allocated: the frame arrived and was dropped.
+        if (packet.size() < 1 + XCP_MAG_SIZE)
+            return;
+        storeRaw(XCP_MAG_OFFSET, d, XCP_MAG_SIZE);
     }
 }
 
