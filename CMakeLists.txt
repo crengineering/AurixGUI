@@ -34,6 +34,11 @@ add_executable(SerialMonitor
     systemfooter.h
 )
 
+# Baut die exe als GUI-Anwendung (Windows-Subsystem) statt als Konsolen-
+# Programm. Ohne das oeffnet Windows beim Start zusaetzlich ein Terminal.
+# Qt liefert dafuer ueber Qt6::EntryPointPrivate das passende WinMain.
+set_target_properties(SerialMonitor PROPERTIES WIN32_EXECUTABLE ON)
+
 target_link_libraries(SerialMonitor PRIVATE
     Qt6::Widgets
     Qt6::SerialPort
