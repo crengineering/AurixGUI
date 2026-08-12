@@ -52,7 +52,7 @@ PortScan scanPortsWorker()
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
-    setWindowTitle("AURIX Monitor");
+    setWindowTitle("Aurix User Interface");
     resize(700, 500);
 
     // 'this' as parent: Qt destroys m_serial automatically with the window.
