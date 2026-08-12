@@ -2,6 +2,7 @@
 #include <QString>
 #include <cmath>
 #include <cstdio>
+#include "appicon.h"
 #include "mainwindow.h"
 #include "mf4writer.h"
 
@@ -60,6 +61,9 @@ int main(int argc, char *argv[])
     // or not be found again after a rename.
     QCoreApplication::setOrganizationName("AurixTricore");
     QCoreApplication::setApplicationName("AurixMonitor");
+
+    // Gilt fuer alle Fenster und Dialoge - Titelleiste, Taskleiste, Alt+Tab.
+    QApplication::setWindowIcon(AppIcon::icon());
 
     MainWindow window;
     window.show();

@@ -18,6 +18,7 @@ add_executable(SerialMonitor
     mainwindow.cpp
     mainwindow.h
     lampicon.h
+    appicon.h
     xcpclient.cpp
     xcpclient.h
     xcppanel.cpp
