@@ -1,6 +1,8 @@
 #include "mainwindow.h"
 #include "xcppanel.h"
 #include "lampicon.h"
+#include "appicon.h"
+#include "titlebar.h"
 
 #include <QCheckBox>
 #include <QTabWidget>
@@ -20,6 +22,11 @@
 
 namespace {
 const QStringList kAurixKeywords = {"AURIX", "Infineon", "XMC", "DAS"};
+
+// Width of the red bars flanking the content, and the radius of the rounded
+// inner edge. Both small on purpose - a frame, not a border.
+constexpr int kFrameBar     = 6;
+constexpr int kCornerRadius = 10;
 
 // Runs in a worker thread. Enumerating COM ports and especially the first
 // open() after a replug can block for seconds while Windows/the FTDI driver
@@ -54,6 +61,9 @@ MainWindow::MainWindow(QWidget *parent)
 {
     setWindowTitle("Aurix User Interface");
     resize(700, 500);
+
+    // Title bar in the same red as the app icon, with white caption text.
+    TitleBar::applyColors(this, AppIcon::Background, AppIcon::Foreground);
 
     // 'this' as parent: Qt destroys m_serial automatically with the window.
     m_serial = new QSerialPort(this);
@@ -108,11 +118,33 @@ MainWindow::MainWindow(QWidget *parent)
     // matter which tab is in front.
     m_footer = new SystemFooter;
 
+    // Red frame continuing the title bar: thin bars down the left and right,
+    // the footer closing it off at the bottom. The bars are not widgets - the
+    // wrapper is red and simply shows through the margin around the tabs.
+    const QString red = AppIcon::Background.name();
+
     auto *centralWrap = new QWidget;
-    auto *centralCol  = new QVBoxLayout(centralWrap);
+    centralWrap->setObjectName("centralWrap");
+    // ID selector: a bare "background" rule here would cascade into every
+    // child and turn the tab pages red as well.
+    centralWrap->setStyleSheet(QString("#centralWrap { background: %1; }").arg(red));
+
+    auto *tabsWrap = new QWidget;                 // transparent - shows the red
+    auto *tabsRow  = new QHBoxLayout(tabsWrap);
+    tabsRow->setContentsMargins(kFrameBar, 0, kFrameBar, 0);
+    tabsRow->addWidget(m_tabs);
+
+    // Rounded inner edge where the content meets the red frame. Once a
+    // stylesheet takes over the pane it must name its own background too,
+    // otherwise the red wrapper shows through the whole page.
+    m_tabs->setStyleSheet(QString(
+        "QTabWidget::pane { background: palette(window); border: 1px solid %1;"
+        " border-radius: %2px; }").arg(red).arg(kCornerRadius));
+
+    auto *centralCol = new QVBoxLayout(centralWrap);
     centralCol->setContentsMargins(0, 0, 0, 0);
     centralCol->setSpacing(0);
-    centralCol->addWidget(m_tabs, 1);
+    centralCol->addWidget(tabsWrap, 1);
     centralCol->addWidget(m_footer, 0);
     setCentralWidget(centralWrap);
 

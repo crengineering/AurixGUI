@@ -19,6 +19,7 @@ add_executable(SerialMonitor
     mainwindow.h
     lampicon.h
     appicon.h
+    titlebar.h
     xcpclient.cpp
     xcpclient.h
     xcppanel.cpp
@@ -46,3 +47,8 @@ target_link_libraries(SerialMonitor PRIVATE
     Qt6::Network
     Qt6::Concurrent
 )
+
+# dwmapi liefert DwmSetWindowAttribute fuer die eingefaerbte Titelleiste.
+if(WIN32)
+    target_link_libraries(SerialMonitor PRIVATE dwmapi)
+endif()

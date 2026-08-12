@@ -1,4 +1,5 @@
 #include "systemfooter.h"
+#include "appicon.h"
 
 #include <QLabel>
 #include <QProgressBar>
@@ -23,6 +24,21 @@ QFrame *makeSeparator()
 SystemFooter::SystemFooter(QWidget *parent)
     : QWidget(parent)
 {
+    // WA_StyledBackground: a QWidget subclass ignores a stylesheet background
+    // unless it either paints one itself or this attribute is set.
+    setAttribute(Qt::WA_StyledBackground, true);
+    setStyleSheet(QString(
+        "SystemFooter { background: %1; }"
+        "QLabel { color: %2; }"
+        "QFrame { color: rgba(255, 255, 255, 0.35); }"   // the separators
+        "QProgressBar { border: 1px solid rgba(255, 255, 255, 0.55);"
+        " border-radius: 5px; background: rgba(0, 0, 0, 0.18);"
+        " color: #ffffff; text-align: center; }"
+        // Dark fill rather than a light one: the percentage is drawn across
+        // the whole bar, so both halves have to stay readable in white.
+        "QProgressBar::chunk { background: rgba(0, 0, 0, 0.38); border-radius: 4px; }")
+        .arg(AppIcon::Background.name(), AppIcon::Foreground.name()));
+
     auto *row = new QHBoxLayout(this);
     row->setContentsMargins(6, 2, 6, 2);
     row->setSpacing(6);
@@ -118,8 +134,10 @@ void SystemFooter::update(const XcpClient::Measurements &m)
         }
         m_lastAlive[i] = m.coreAlive[i];
 
+        // Amber, not red: the footer background is now red, so the old red
+        // marker for a hung core would have been invisible against it.
         m_coreValue[i]->setStyleSheet(m_staleCount[i] >= STALE_LIMIT
-                                          ? "color: red; font-weight: bold;"
+                                          ? "color: #ffd400; font-weight: bold;"
                                           : QString());
     }
 

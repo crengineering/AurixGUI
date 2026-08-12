@@ -16,6 +16,7 @@ namespace AppIcon {
 
 inline const QColor Background(178, 34, 40);   // deep red badge
 inline const QColor Foreground(240, 244, 248); // near-white letters
+inline const QColor Border(255, 255, 255);     // ring around the badge
 
 inline QPixmap pixmap(int size)
 {
@@ -25,26 +26,34 @@ inline QPixmap pixmap(int size)
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::TextAntialiasing);
-
-    // Badge. Inset by half a pixel so the antialiased edge stays inside.
-    const QRectF box(0.5, 0.5, size - 1.0, size - 1.0);
     p.setPen(Qt::NoPen);
-    p.setBrush(Background);
-    p.drawRoundedRect(box, size * 0.18, size * 0.18);
 
-    // Scale the font so "AUI" fills a fixed fraction of the width at any
+    // White ring, so the badge stays visible against the red title bar.
+    // Drawn as a filled rounded rect with the red one laid on top, rather
+    // than as a stroke - a stroke straddles the path and would blur away at
+    // 16px. Inset by half a pixel so the antialiased edge stays inside.
+    const qreal ring = qMax(1.0, size * 0.08);
+    const QRectF outer(0.5, 0.5, size - 1.0, size - 1.0);
+    p.setBrush(Border);
+    p.drawRoundedRect(outer, size * 0.18, size * 0.18);
+
+    const QRectF inner = outer.adjusted(ring, ring, -ring, -ring);
+    p.setBrush(Background);
+    p.drawRoundedRect(inner, inner.width() * 0.16, inner.width() * 0.16);
+
+    // Scale the font so "AUI" fills a fixed fraction of the badge at any
     // icon size: measure once at a guess, then correct by the ratio.
     const QString text = QStringLiteral("AUI");
     QFont f(QStringLiteral("Segoe UI"));
     f.setBold(true);
-    f.setPixelSize(qMax(4, int(size * 0.5)));
+    f.setPixelSize(qMax(4, int(inner.width() * 0.5)));
     const qreal advance = QFontMetricsF(f).horizontalAdvance(text);
     if (advance > 0.0)
-        f.setPixelSize(qMax(4, int(f.pixelSize() * (size * 0.76) / advance)));
+        f.setPixelSize(qMax(4, int(f.pixelSize() * (inner.width() * 0.82) / advance)));
 
     p.setFont(f);
     p.setPen(Foreground);
-    p.drawText(QRectF(0, 0, size, size), Qt::AlignCenter, text);
+    p.drawText(inner, Qt::AlignCenter, text);
     return pm;
 }
 
