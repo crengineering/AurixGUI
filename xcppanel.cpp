@@ -990,8 +990,11 @@ void XcpPanel::onConnected(const QString &ident)
     m_lastDaqMs = 0;
     m_pollTimer->start();
     readCalibration();                          // populate the calibration tab
-    m_client->pollMeasurements(XCP_DATA_ADDR);  // one poll: version + magic
-    m_client->startDaq(XCP_DATA_ADDR);          // then event-driven streaming (2 ODTs)
+    // How many bytes to move comes from the A2L, not from a constant here: add
+    // a MEASUREMENT and both the poll and the DAQ list grow to cover it.
+    const int blockSize = measurementBlockSize();
+    m_client->pollMeasurements(XCP_DATA_ADDR, blockSize);  // one poll: version + magic
+    m_client->startDaq(XCP_DATA_ADDR, blockSize);          // then event-driven streaming
 }
 
 void XcpPanel::onDaqStarted()
@@ -1536,7 +1539,16 @@ void XcpPanel::pollTick()
         }
         return;
     }
-    m_client->pollMeasurements(XCP_DATA_ADDR);
+    m_client->pollMeasurements(XCP_DATA_ADDR, measurementBlockSize());
+}
+
+// Bytes of Xcp_Data the loaded A2L describes. Falls back to a size that covers
+// the fields parseNamedFields() needs for the footer, so a missing or truncated
+// A2L degrades to the built-in signals instead of showing nothing at all.
+int XcpPanel::measurementBlockSize() const
+{
+    const int fromA2l = A2lModel::blockExtent(m_meas, XCP_DATA_ADDR);
+    return qMax(fromA2l, 180);
 }
 
 void XcpPanel::setConnectedState(bool connected)

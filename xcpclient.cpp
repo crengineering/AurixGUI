@@ -24,18 +24,20 @@ constexpr quint8 PID_RES = 0xFF;
 constexpr quint8 PID_ERR = 0xFE;
 
 constexpr quint32 XCP_DATA_MAGIC = 0x41555258;  // must match Measurements.h
-constexpr int     XCP_DATA_SIZE  = 52;          // core block: magic..baroAlt
-constexpr int     XCP_IMU_OFFSET = 52;          // IMU sub-block starts at 0x34
-constexpr int     XCP_IMU_SIZE   = 32;          // imuPresent(+pad) + 7 floats
+
+// Largest payload one packet can carry: MAX_CTO / MAX_DTO is 64, minus the PID
+// byte. Applies to both a SHORT_UPLOAD response and a DAQ ODT.
+constexpr int     XCP_CHUNK_MAX  = 63;
+
+// Offsets of the sub-structures inside Xcp_Data, used ONLY by the named-field
+// convenience layer (parseNamedFields) that feeds the footer and the older
+// tabs. The transport no longer knows about them: it moves the whole block in
+// XCP_CHUNK_MAX-sized pieces whose count comes from the A2L. Anything described
+// in the A2L is read straight out of Measurements::raw and needs nothing here.
+constexpr int     XCP_IMU_OFFSET  = 52;         // IMU sub-block at 0x34
 constexpr int     XCP_AHRS_OFFSET = 84;         // attitude sub-block at 0x54
-constexpr int     XCP_AHRS_SIZE   = 40;         // state/accOk(+pad) + 9 floats
 constexpr int     XCP_SYS_OFFSET  = 124;        // core + Ethernet stats at 0x7C
-constexpr int     XCP_SYS_SIZE    = 56;         // 6*u32 + 6*u16 + 6*u16 + u32 + 2*u16
-constexpr int     XCP_MAG_OFFSET  = 180;        // magnetometer sub-block at 0xB4
-constexpr int     XCP_MAG_SIZE    = 24;         // magPresent(+pad) + 5 floats
-constexpr int     XCP_BLOCK_SIZE  = 204;        // full Xcp_Data (Measurements.h)
-                                                // grew 180 -> 204 with the
-                                                // MMC5983MA block in fw v1.15.0
+
 constexpr int     TIMEOUT_MS     = 500;
 }
 
@@ -91,32 +93,46 @@ void XcpClient::disconnectFromSlave()
     emit disconnected();
 }
 
-void XcpClient::pollMeasurements(quint32 address)
+QVector<QPair<int, int>> XcpClient::blockChunks() const
 {
-    if (!m_connected)
+    QVector<QPair<int, int>> chunks;
+    for (int off = 0; off < m_blockSize; off += XCP_CHUNK_MAX)
+        chunks.append({off, qMin(XCP_CHUNK_MAX, m_blockSize - off)});
+    return chunks;
+}
+
+void XcpClient::pollMeasurements(quint32 address, int blockSize)
+{
+    if (!m_connected || blockSize <= 0)
         return;
 
     // never let polls pile up behind a slow link
     for (const Request &r : m_queue)
-        if (r.type == ReqType::Poll)
+        if (r.type == ReqType::PollChunk)
             return;
-    if (m_busy && m_current.type == ReqType::Poll)
+    if (m_busy && m_current.type == ReqType::PollChunk)
         return;
 
-    // The block is 84 bytes > MAX_CTO(64), so read it in two SHORT_UPLOADs:
-    // the 52-byte core, then the 32-byte IMU sub-block. The pair fills m_accum
-    // and the IMU response emits the merged measurementsReceived().
-    QByteArray core(8, '\0');
-    core[0] = char(CMD_SHORT_UPLOAD);
-    core[1] = char(XCP_DATA_SIZE);
-    qToLittleEndian<quint32>(address, core.data() + 4);
-    enqueue({ReqType::Poll, core, address});
+    m_blockBase = address;
+    m_blockSize = blockSize;
 
-    QByteArray imu(8, '\0');
-    imu[0] = char(CMD_SHORT_UPLOAD);
-    imu[1] = char(XCP_IMU_SIZE);
-    qToLittleEndian<quint32>(address + XCP_IMU_OFFSET, imu.data() + 4);
-    enqueue({ReqType::PollImu, imu, address + XCP_IMU_OFFSET});
+    // The block exceeds MAX_CTO(64), so read it as consecutive SHORT_UPLOADs.
+    // The chunk count follows blockSize, which comes from the A2L -- nothing
+    // here names a peripheral, so a new measurement is covered automatically.
+    const QVector<QPair<int, int>> chunks = blockChunks();
+    for (int i = 0; i < chunks.size(); ++i) {
+        const int off = chunks[i].first;
+        const int len = chunks[i].second;
+
+        QByteArray cmd(8, '\0');
+        cmd[0] = char(CMD_SHORT_UPLOAD);
+        cmd[1] = char(len);
+        qToLittleEndian<quint32>(address + quint32(off), cmd.data() + 4);
+
+        Request r{ReqType::PollChunk, cmd, address + quint32(off), off, len,
+                  (i == chunks.size() - 1)};
+        enqueue(r);
+    }
 }
 
 void XcpClient::readMemory(quint32 address, quint8 len)
@@ -144,10 +160,13 @@ void XcpClient::writeMemory(quint32 address, const QByteArray &data)
     enqueue({ReqType::MemWrite, cmd, address});
 }
 
-void XcpClient::startDaq(quint32 baseAddress)
+void XcpClient::startDaq(quint32 baseAddress, int blockSize)
 {
-    if (!m_connected)
+    if (!m_connected || blockSize <= 0)
         return;
+
+    m_blockBase = baseAddress;
+    m_blockSize = blockSize;
 
     auto simple = [this](std::initializer_list<quint8> bytes) {
         QByteArray p;
@@ -165,35 +184,30 @@ void XcpClient::startDaq(quint32 baseAddress)
         enqueue({ReqType::DaqCmd, wr, 0});
     };
 
-    // Four ODTs, one per sub-block. Every field the GUI shows must live in the
-    // DAQ stream: after startDaq() the client stops polling, so anything not in
-    // an ODT simply never updates (the core-load footer read 0 % until ODT2/ODT3
-    // were added). Each ODT carries at most XCP_DAQ_MAX_ODT_DATA = 63 bytes and
-    // the firmware allows XCP_DAQ_MAX_ODTS = 4, so 44/32/40/56 fits exactly.
+    // The whole block, split into consecutive ODTs of at most XCP_CHUNK_MAX
+    // bytes. Both the count and the extents follow blockSize, which the caller
+    // took from the A2L -- so every byte any MEASUREMENT describes is in the
+    // stream by construction.
+    //
+    // That matters because after startDaq() the client stops polling: anything
+    // not in an ODT never updates again. Two bugs came from hand-maintaining
+    // this list (the core-load footer read 0 % until ODT2/ODT3 were added, and
+    // the magnetometer read a constant 0 because its frames had nowhere to go).
+    // Deriving it removes that whole class.
+    const QVector<QPair<int, int>> chunks = blockChunks();
+    m_lastOdt = chunks.size() - 1;
+
     simple({CMD_FREE_DAQ});
     simple({CMD_ALLOC_DAQ, 0x00, 0x01, 0x00});                   // 1 list
-    simple({CMD_ALLOC_ODT, 0x00, 0x00, 0x00, 0x05});            // 5 ODTs
-    simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x00, 0x01});// ODT0: 1 entry
-    simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x01, 0x01});// ODT1: 1 entry
-    simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x02, 0x01});// ODT2: 1 entry
-    simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x03, 0x01});// ODT3: 1 entry
-    simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, 0x04, 0x01});// ODT4: 1 entry
+    simple({CMD_ALLOC_ODT, 0x00, 0x00, 0x00, quint8(chunks.size())});
+    for (int i = 0; i < chunks.size(); ++i)
+        simple({CMD_ALLOC_ODT_ENTRY, 0x00, 0x00, 0x00, quint8(i), 0x01});
 
-    // ODT0 = core+baro (tick..baroAlt), 44 bytes at base+8
-    simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, 0x00, 0x00});
-    writeDaq(XCP_DATA_SIZE - 8, baseAddress + 8);
-    // ODT1 = IMU sub-block, 32 bytes at base+52
-    simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, 0x01, 0x00});
-    writeDaq(XCP_IMU_SIZE, baseAddress + XCP_IMU_OFFSET);
-    // ODT2 = attitude estimate, 40 bytes at base+84
-    simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, 0x02, 0x00});
-    writeDaq(XCP_AHRS_SIZE, baseAddress + XCP_AHRS_OFFSET);
-    // ODT3 = core load + Ethernet, 56 bytes at base+124
-    simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, 0x03, 0x00});
-    writeDaq(XCP_SYS_SIZE, baseAddress + XCP_SYS_OFFSET);
-    // ODT4 = magnetometer, 24 bytes at base+180 (MMC5983MA, fw >= v1.15.0)
-    simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, 0x04, 0x00});
-    writeDaq(XCP_MAG_SIZE, baseAddress + XCP_MAG_OFFSET);
+    for (int i = 0; i < chunks.size(); ++i) {
+        simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, quint8(i), 0x00});
+        writeDaq(quint8(chunks[i].second),
+                 baseAddress + quint32(chunks[i].first));
+    }
 
     simple({CMD_SET_DAQ_MODE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00});
     enqueue({ReqType::DaqStart, QByteArray("\xDE\x01\x00\x00", 4), 0});
@@ -269,9 +283,11 @@ void XcpClient::parseImu(const char *d)
 
 void XcpClient::storeRaw(int offset, const char *d, int len)
 {
-    if (m_accum.raw.size() != XCP_BLOCK_SIZE)
-        m_accum.raw = QByteArray(XCP_BLOCK_SIZE, char(0));
-    if (offset >= 0 && len > 0 && offset + len <= XCP_BLOCK_SIZE)
+    // Buffer sizes itself to the block the A2L asked for, so it always covers
+    // every described measurement.
+    if (m_accum.raw.size() != m_blockSize)
+        m_accum.raw = QByteArray(m_blockSize, char(0));
+    if (offset >= 0 && len > 0 && offset + len <= m_blockSize)
         std::memcpy(m_accum.raw.data() + offset, d, size_t(len));
 }
 
@@ -311,6 +327,51 @@ void XcpClient::parseSys(const char *d)
     m_accum.ethLinkMbits   = qFromLittleEndian<quint16>(d + 54);
 }
 
+void XcpClient::parseNamedFields()
+{
+    // Convenience layer only: fills the C++ struct members the footer and the
+    // older tabs read. Everything described in the A2L is decoded from
+    // Measurements::raw instead, so nothing needs adding here for a new signal.
+    if (m_accum.raw.size() < m_blockSize)
+        return;
+
+    const char *d = m_accum.raw.constData();
+
+    m_accum.valid    = (qFromLittleEndian<quint32>(d) == XCP_DATA_MAGIC);
+    m_accum.verMajor = quint8(d[4]);
+    m_accum.verMinor = quint8(d[5]);
+    m_accum.verStep  = quint8(d[6]);
+    m_accum.tickMs   = qFromLittleEndian<quint32>(d + 8);
+
+    auto readF = [d](int off) {
+        float f = 0.0f;
+        std::memcpy(&f, d + off, sizeof(f));            // IEEE754 LE
+        return f;
+    };
+    m_accum.dieTempC    = readF(12);
+    m_accum.dtscTempC   = readF(16);
+    m_accum.vddCore     = readF(20);
+    m_accum.vddp3       = readF(24);
+    m_accum.vext        = readF(28);
+    m_accum.baroPresent = (quint8(d[35]) != 0);
+    m_accum.diagStatus  = qFromLittleEndian<quint32>(d + 36);
+    m_accum.baroPressPa = readF(40);
+    m_accum.baroTempC   = readF(44);
+    m_accum.baroAltM    = readF(48);
+
+    if (m_blockSize >= XCP_IMU_OFFSET + 32)
+        parseImu(d + XCP_IMU_OFFSET);
+    if (m_blockSize >= XCP_AHRS_OFFSET + 40)
+        parseAhrs(d + XCP_AHRS_OFFSET);
+    if (m_blockSize >= XCP_SYS_OFFSET + 56)
+        parseSys(d + XCP_SYS_OFFSET);
+
+    m_verMajor = m_accum.verMajor;      // cached for DAQ frames, which carry
+    m_verMinor = m_accum.verMinor;      // no version of their own
+    m_verStep  = m_accum.verStep;
+    m_verValid = m_accum.valid;
+}
+
 void XcpClient::handleDaqFrame(const QByteArray &packet)
 {
     if (packet.isEmpty())
@@ -319,62 +380,29 @@ void XcpClient::handleDaqFrame(const QByteArray &packet)
     const quint8 pid = quint8(packet[0]);
     const char  *d   = packet.constData() + 1;
 
-    if (pid == 0) {
-        // ODT0: tick u32, dts f, dtsc f, vdd f, vddp3 f, vext f, raw codes u32
-        // (byte 27 = baroPresent), diagStatus u32, baroPress f, baroTemp f,
-        // baroAlt f  (= Xcp_Data + 8, 44 bytes). Emits with the last IMU values
-        // held in m_accum from the ODT1 frame.
-        if (packet.size() < 1 + 44)
-            return;
-        auto readF = [d](int off) {
-            float f = 0.0f;
-            std::memcpy(&f, d + off, sizeof(f));
-            return f;
-        };
-        m_accum.valid    = m_verValid;
-        m_accum.verMajor = m_verMajor;
-        m_accum.verMinor = m_verMinor;
-        m_accum.verStep  = m_verStep;
-        m_accum.tickMs   = qFromLittleEndian<quint32>(d);
-        m_accum.dieTempC    = readF(4);
-        m_accum.dtscTempC   = readF(8);
-        m_accum.vddCore     = readF(12);
-        m_accum.vddp3       = readF(16);
-        m_accum.vext        = readF(20);
-        m_accum.baroPresent = (quint8(d[27]) != 0);
-        m_accum.diagStatus  = qFromLittleEndian<quint32>(d + 28);
-        m_accum.baroPressPa = readF(32);
-        m_accum.baroTempC   = readF(36);
-        m_accum.baroAltM    = readF(40);
-        storeRaw(8, d, 44);
+    // The PID is the ODT index, and startDaq() laid the ODTs out as consecutive
+    // slices of the block, so the PID alone gives the destination offset. No
+    // per-peripheral branch, and therefore no frame that can arrive with
+    // nowhere to be stored.
+    const QVector<QPair<int, int>> chunks = blockChunks();
+    if (pid >= chunks.size())
+        return;                             // stale DAQ list from a previous run
+
+    const int off = chunks[pid].first;
+    const int len = chunks[pid].second;
+    if (packet.size() < 1 + len)
+        return;
+
+    storeRaw(off, d, len);
+
+    // Emit once per event, after the final ODT of the cycle. The firmware sends
+    // them in index order, so by here the block is whole -- which also removes
+    // the one-frame lag the old ODT0-emits scheme had on every sub-block.
+    if (int(pid) == m_lastOdt) {
+        // ODT0 now starts at offset 0, so the magic word and version travel in
+        // the DAQ stream too -- no need to cache them from a prior poll.
+        parseNamedFields();
         emit measurementsReceived(m_accum);
-    } else if (pid == 1) {
-        // ODT1: the 32-byte IMU sub-block. Stored into m_accum; the next ODT0
-        // frame carries it out (both fire every 100 ms, so <=1 frame of lag).
-        if (packet.size() < 1 + XCP_IMU_SIZE)
-            return;
-        parseImu(d);
-        storeRaw(XCP_IMU_OFFSET, d, XCP_IMU_SIZE);
-    } else if (pid == 2) {
-        // ODT2: attitude estimate. Same store-and-carry pattern as ODT1.
-        if (packet.size() < 1 + XCP_AHRS_SIZE)
-            return;
-        parseAhrs(d);
-        storeRaw(XCP_AHRS_OFFSET, d, XCP_AHRS_SIZE);
-    } else if (pid == 3) {
-        // ODT3: per-core load + Ethernet, feeding the permanent footer.
-        if (packet.size() < 1 + XCP_SYS_SIZE)
-            return;
-        parseSys(d);
-        storeRaw(XCP_SYS_OFFSET, d, XCP_SYS_SIZE);
-    } else if (pid == 4) {
-        // ODT4: magnetometer (MMC5983MA, fw >= v1.15.0). Raw only -- every
-        // field is reached through the A2L, so no hand-written parse is
-        // needed. Missing this branch is what made the mag read a constant 0
-        // even after the ODT was allocated: the frame arrived and was dropped.
-        if (packet.size() < 1 + XCP_MAG_SIZE)
-            return;
-        storeRaw(XCP_MAG_OFFSET, d, XCP_MAG_SIZE);
     }
 }
 
@@ -440,61 +468,17 @@ void XcpClient::handleResponse(const QByteArray &packet)
         emit connected(QString::fromLatin1(packet.mid(1, int(m_identLen))));
         break;
 
-    case ReqType::Poll:
-        // Core chunk: fill m_accum but do not emit yet — the chained PollImu
-        // response emits the merged block (see pollMeasurements()).
-        if (packet.size() >= 1 + XCP_DATA_SIZE) {
-            const char *d = packet.constData() + 1;
-            m_accum.valid    = (qFromLittleEndian<quint32>(d) == XCP_DATA_MAGIC);
-            m_accum.verMajor = quint8(d[4]);
-            m_accum.verMinor = quint8(d[5]);
-            m_accum.verStep  = quint8(d[6]);
-            m_accum.tickMs   = qFromLittleEndian<quint32>(d + 8);
-            auto readF = [d](int off) {
-                float f = 0.0f;
-                std::memcpy(&f, d + off, sizeof(f));         // IEEE754 LE
-                return f;
-            };
-            m_accum.dieTempC    = readF(12);
-            m_accum.dtscTempC   = readF(16);
-            m_accum.vddCore     = readF(20);
-            m_accum.vddp3       = readF(24);
-            m_accum.vext        = readF(28);
-            m_accum.baroPresent = (quint8(d[35]) != 0);
-            m_accum.diagStatus  = qFromLittleEndian<quint32>(d + 36);
-            m_accum.baroPressPa = readF(40);
-            m_accum.baroTempC   = readF(44);
-            m_accum.baroAltM    = readF(48);
-            m_verMajor = m_accum.verMajor;       // cache for DAQ frames
-            m_verMinor = m_accum.verMinor;
-            m_verStep  = m_accum.verStep;
-            m_verValid = m_accum.valid;
-            storeRaw(0, d, XCP_DATA_SIZE);
-        }
-        break;
+    case ReqType::PollChunk:
+        // One slice of the block. Each chunk only stores; the last one in the
+        // sequence decodes the named fields and emits the merged block, so the
+        // consumer always sees a consistent snapshot.
+        if (packet.size() >= 1 + m_current.len)
+            storeRaw(m_current.off, packet.constData() + 1, m_current.len);
 
-    case ReqType::PollImu:
-        // IMU chunk: fill m_accum only; the last chunk in the chain emits.
-        if (packet.size() >= 1 + XCP_IMU_SIZE) {
-            parseImu(packet.constData() + 1);
-            storeRaw(XCP_IMU_OFFSET, packet.constData() + 1, XCP_IMU_SIZE);
+        if (m_current.last) {
+            parseNamedFields();
+            emit measurementsReceived(m_accum);
         }
-        break;
-
-    case ReqType::PollAhrs:
-        if (packet.size() >= 1 + XCP_AHRS_SIZE) {
-            parseAhrs(packet.constData() + 1);
-            storeRaw(XCP_AHRS_OFFSET, packet.constData() + 1, XCP_AHRS_SIZE);
-        }
-        break;
-
-    case ReqType::PollSys:
-        // Final chunk of the chain: complete m_accum and emit the merged block.
-        if (packet.size() >= 1 + XCP_SYS_SIZE) {
-            parseSys(packet.constData() + 1);
-            storeRaw(XCP_SYS_OFFSET, packet.constData() + 1, XCP_SYS_SIZE);
-        }
-        emit measurementsReceived(m_accum);
         break;
 
     case ReqType::MemRead:

@@ -65,6 +65,20 @@ public:
     // is (m.addr - blockBase). Returns false if the buffer does not cover it.
     static bool decode(const QByteArray &raw, quint32 blockBase,
                        const A2lMeas &m, double *out);
+
+    // Number of bytes that must be fetched from blockBase for every MEASUREMENT
+    // in the list to be decodable: max(addr - base + sizeof(type)).
+    //
+    // This is what lets the transport size itself from the firmware
+    // description instead of a hardcoded block length. Add a MEASUREMENT to the
+    // A2L and the fetched block grows to cover it -- no GUI constant to bump,
+    // and no silently dropped signal when someone forgets.
+    //
+    // Measurements below blockBase, or beyond limit bytes past it, are ignored:
+    // Xcp_Cal / Xcp_Nvm / Xcp_Gpio sit 256 bytes apart, so a stray object in
+    // another block must not drag the fetch length across the gap.
+    static int blockExtent(const QVector<A2lMeas> &meas, quint32 blockBase,
+                           int limit = 256);
 };
 
 #endif // A2LMODEL_H

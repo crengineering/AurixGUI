@@ -67,6 +67,7 @@ private:
     QWidget *buildNvmTab();
     QWidget *buildPlotTab();
     void     setConnectedState(bool connected);
+    int      measurementBlockSize() const;  // Xcp_Data bytes the A2L describes
     void     updateDiagTable(quint32 status);
     void     updateLogStatus();
     bool     chooseLogChannels(QVector<int> *out);   // pre-log channel picker

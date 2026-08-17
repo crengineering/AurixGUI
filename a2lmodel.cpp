@@ -226,3 +226,21 @@ bool A2lModel::decode(const QByteArray &raw, quint32 blockBase,
     }
     return true;
 }
+
+int A2lModel::blockExtent(const QVector<A2lMeas> &meas, quint32 blockBase,
+                          int limit)
+{
+    int extent = 0;
+
+    for (const A2lMeas &m : meas) {
+        if (m.addr < blockBase)
+            continue;                       // belongs to a different block
+
+        const int end = int(m.addr - blockBase) + a2lTypeSize(m.type);
+        if (end > limit)
+            continue;                       // past the next block, not ours
+        if (end > extent)
+            extent = end;
+    }
+    return extent;
+}

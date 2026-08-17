@@ -5,6 +5,8 @@
 #include <QUdpSocket>
 #include <QHostAddress>
 #include <QQueue>
+#include <QVector>
+#include <QPair>
 
 class QTimer;
 
@@ -78,16 +80,25 @@ public:
     void disconnectFromSlave();
     bool isConnected() const { return m_connected; }
 
-    void pollMeasurements(quint32 address);           // cyclic Xcp_Data read
+    // Cyclic read of the whole measurement block. blockSize comes from the A2L
+    // (A2lModel::blockExtent), so the transport never needs to know which
+    // peripherals exist -- it just moves N bytes in MAX_CTO-sized chunks.
+    void pollMeasurements(quint32 address, int blockSize);
     void readMemory(quint32 address, quint8 len);     // -> memoryRead()
     void writeMemory(quint32 address, const QByteArray &data); // -> memoryWritten()
 
-    // Configure and start the DAQ list (event channel 0, 100 ms on the
-    // board). The 84-byte Xcp_Data block exceeds the 63-byte MAX_DTO, so it is
-    // split across two ODTs: ODT0 = tick..baroAlt (44 B @ base+8), ODT1 = the
-    // IMU sub-block (32 B @ base+52). Measurements then arrive event-driven via
-    // measurementsReceived() without polling. Pass the block base address.
-    void startDaq(quint32 baseAddress);
+    // Configure and start the DAQ list (event channel 0, 100 ms on the board).
+    // The block exceeds the 63-byte MAX_DTO, so it is split across
+    // ceil(blockSize / 63) ODTs of consecutive bytes; ODT i covers
+    // [i*63, i*63+len). Measurements then arrive event-driven via
+    // measurementsReceived() without polling.
+    //
+    // Both the ODT count and their extents are derived from blockSize, so
+    // adding a field to Xcp_Data and its A2L entry is enough -- there is no
+    // per-peripheral branch to forget. (Forgetting one is exactly what made the
+    // magnetometer read a constant 0 for a while: its ODT was allocated, the
+    // frames arrived, and nothing stored them.)
+    void startDaq(quint32 baseAddress, int blockSize);
     bool daqActive() const { return m_daqActive; }
 
 signals:
@@ -105,12 +116,15 @@ private slots:
     void onTimeout();
 
 private:
-    enum class ReqType { Connect, GetId, UploadId, Poll, PollImu, PollAhrs, PollSys,
+    enum class ReqType { Connect, GetId, UploadId, PollChunk,
                          MemRead, MemWrite, DaqCmd, DaqStart };
     struct Request {
         ReqType    type;
         QByteArray packet;
         quint32    addr = 0;
+        int        off  = 0;      // PollChunk: offset into the block
+        int        len  = 0;      // PollChunk: bytes requested
+        bool       last = false;  // PollChunk: emit after storing this one
     };
 
     void enqueue(Request req);
@@ -122,6 +136,15 @@ private:
     void parseSys(const char *d);   // fill m_accum core/Ethernet stats (56-byte block)
     void storeRaw(int offset, const char *d, int len);  // mirror into m_accum.raw
     void dropConnection(const QString &reason);
+
+    // Fill the named Measurements fields from the assembled m_accum.raw. Only a
+    // convenience layer over raw, for the footer and the older tabs that use
+    // C++ struct members; anything A2L-described is read out of raw directly and
+    // needs nothing here.
+    void parseNamedFields();
+
+    // Byte extents of the ODT / SHORT_UPLOAD chunks the block is split into.
+    QVector<QPair<int, int>> blockChunks() const;   // (offset, length)
 
     QUdpSocket     *m_socket  = nullptr;
     QTimer         *m_timeout = nullptr;
@@ -138,9 +161,12 @@ private:
     quint8          m_verMinor  = 0;    // frames do not carry the version
     quint8          m_verStep   = 0;
     bool            m_verValid  = false;
-    // Running measurement state assembled across the two poll chunks / two DAQ
-    // ODTs before a single measurementsReceived() is emitted.
+    // Running measurement state assembled across the poll chunks / DAQ ODTs
+    // before a single measurementsReceived() is emitted.
     Measurements    m_accum;
+    quint32         m_blockBase = 0;    // Xcp_Data base address
+    int             m_blockSize = 0;    // bytes to fetch, from the A2L
+    int             m_lastOdt   = 0;    // highest ODT index in use
 };
 
 #endif // XCPCLIENT_H
