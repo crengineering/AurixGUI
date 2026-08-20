@@ -38,6 +38,7 @@ signals:
 
 private slots:
     void toggleConnection();
+    void tryAutoConnect();                    // auto-connect / retry after a drop
     void onConnected(const QString &ident);
     void onDisconnected();
     void onMeasurements(const XcpClient::Measurements &m);
@@ -76,6 +77,14 @@ private:
 
     XcpClient      *m_client     = nullptr;
     QTimer         *m_pollTimer  = nullptr;
+    // Reconnect after a flash / power cycle without pressing Connect: every
+    // drop schedules one retry, until the board answers again.
+    QTimer         *m_reconnectTimer = nullptr;
+    bool            m_autoConnect    = true;   // cleared by a manual Disconnect
+    bool            m_inConnect      = false;  // guards connectToSlave's own
+                                               // disconnected() emission
+    bool            m_retryLogged    = false;  // "connecting" logged once per burst
+    bool            m_retryErrLogged = false;  // ditto for the timeout message
     QTabWidget     *m_subTabs    = nullptr;   // Diagnostics tab carries a lamp icon
 
     // connection row

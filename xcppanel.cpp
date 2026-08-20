@@ -189,6 +189,13 @@ XcpPanel::XcpPanel(QWidget *parent)
 
     connect(m_connectBtn, &QPushButton::clicked, this, &XcpPanel::toggleConnection);
     connect(m_pollTimer,  &QTimer::timeout,      this, &XcpPanel::pollTick);
+
+    // One retry per drop (not a free-running timer): a connect attempt that
+    // finds nobody home ends in a timeout -> disconnected() -> next retry.
+    m_reconnectTimer = new QTimer(this);
+    m_reconnectTimer->setSingleShot(true);
+    m_reconnectTimer->setInterval(2000);
+    connect(m_reconnectTimer, &QTimer::timeout, this, &XcpPanel::tryAutoConnect);
     connect(m_client, &XcpClient::connected,            this, &XcpPanel::onConnected);
     connect(m_client, &XcpClient::disconnected,         this, &XcpPanel::onDisconnected);
     connect(m_client, &XcpClient::measurementsReceived, this, &XcpPanel::onMeasurements);
@@ -204,8 +211,9 @@ XcpPanel::XcpPanel(QWidget *parent)
     restoreAutosavedConfig();
 
     // connect to the board automatically on startup (with the default
-    // host/port); a failed attempt just logs a timeout and can be retried
-    QTimer::singleShot(0, this, &XcpPanel::toggleConnection);
+    // host/port) and keep retrying, so a flash or a power cycle comes back
+    // on its own instead of needing a click on Connect
+    QTimer::singleShot(0, this, &XcpPanel::tryAutoConnect);
 }
 
 QWidget *XcpPanel::buildLiveTab()
@@ -970,17 +978,52 @@ void XcpPanel::relayoutPlots()
 void XcpPanel::toggleConnection()
 {
     if (m_client->isConnected()) {
+        // Disconnecting by hand means it should stay disconnected.
+        m_autoConnect = false;
+        m_reconnectTimer->stop();
         m_client->disconnectFromSlave();
-    } else {
+        return;
+    }
+
+    m_autoConnect    = true;    // pressing Connect re-arms the retries
+    m_retryLogged    = false;
+    m_retryErrLogged = false;
+    tryAutoConnect();
+}
+
+void XcpPanel::tryAutoConnect()
+{
+    if (m_client->isConnected())
+        return;
+
+    m_reconnectTimer->stop();
+
+    // Log the attempt once per burst; the retries afterwards stay silent so a
+    // board that is off does not fill the log.
+    if (!m_retryLogged) {
         m_log->appendPlainText(QString("[Connecting to %1:%2 ...]")
                                    .arg(m_hostEdit->text())
                                    .arg(m_portBox->value()));
-        m_client->connectToSlave(m_hostEdit->text(), quint16(m_portBox->value()));
+        m_retryLogged = true;
     }
+
+    // connectToSlave() may emit disconnected() itself while clearing a stale
+    // session - that must not count as a drop and schedule another retry.
+    m_inConnect = true;
+    m_client->connectToSlave(m_hostEdit->text(), quint16(m_portBox->value()));
+    m_inConnect = false;
+
+    // An invalid IP never reaches the socket, so no timeout will arrive to
+    // drive the next retry - schedule it here.
+    if (!m_client->isConnected() && m_autoConnect && !m_reconnectTimer->isActive())
+        m_reconnectTimer->start();
 }
 
 void XcpPanel::onConnected(const QString &ident)
 {
+    m_reconnectTimer->stop();
+    m_retryLogged    = false;
+    m_retryErrLogged = false;
     m_identLbl->setText(ident.isEmpty() ? "(unknown)" : ident);
     m_log->appendPlainText("[Connected: " + m_identLbl->text() + "]");
     setConnectedState(true);
@@ -1009,9 +1052,17 @@ void XcpPanel::onDaqFailed()
 
 void XcpPanel::onDisconnected()
 {
+    if (m_inConnect)
+        return;                 // stale session torn down inside connectToSlave
+
     m_pollTimer->stop();
     setConnectedState(false);
-    m_log->appendPlainText("[Disconnected]");
+    // Only the first drop of a burst is worth a line; the retries are silent.
+    if (!m_retryLogged)
+        m_log->appendPlainText("[Disconnected]");
+
+    if (m_autoConnect)
+        m_reconnectTimer->start();
 }
 
 void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
@@ -1526,6 +1577,13 @@ void XcpPanel::onMemoryWritten(quint32 address)
 
 void XcpPanel::onError(const QString &message)
 {
+    // While retrying, every failed attempt reports the same timeout - say it
+    // once per burst instead of once every two seconds.
+    if (!m_client->isConnected() && m_autoConnect) {
+        if (m_retryErrLogged)
+            return;
+        m_retryErrLogged = true;
+    }
     m_log->appendPlainText("[Error: " + message + "]");
 }
 
