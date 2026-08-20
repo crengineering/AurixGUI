@@ -1,0 +1,7 @@
+/* Icon resource for Explorer, the Start menu and the taskbar pin. Those all
+   read the exe's Win32 resources; QApplication::setWindowIcon() only reaches
+   the window itself. aui.ico is generated from appicon.h by tools/mkicon.cpp
+   (target aui-icon), so both show the same badge.
+   Resource id 1: the lowest-numbered ICON is the one Windows uses as the
+   application icon. */
+1 ICON "aui.ico"
