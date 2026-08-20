@@ -56,6 +56,12 @@ public:
         float   biasY       = 0.0f;
         float   biasZ       = 0.0f;
 
+        // Peripherals whose only named field is the presence flag: the samples
+        // themselves are A2L-described and read straight out of raw, so nothing
+        // else about them needs a struct member here.
+        bool    magPresent  = false;// MMC5983MA answered at init
+        bool    gnssPresent = false;// NEO-M9N answered at init
+
         // per-core execution time (CoreStats.c)
         quint32 coreExecUs[6]   = {0,0,0,0,0,0};  // busy time per 100 ms [us]
         quint16 coreLoadPmil[6] = {0,0,0,0,0,0};  // per mille of the window

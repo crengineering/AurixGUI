@@ -37,6 +37,8 @@ constexpr int     XCP_CHUNK_MAX  = 63;
 constexpr int     XCP_IMU_OFFSET  = 52;         // IMU sub-block at 0x34
 constexpr int     XCP_AHRS_OFFSET = 84;         // attitude sub-block at 0x54
 constexpr int     XCP_SYS_OFFSET  = 124;        // core + Ethernet stats at 0x7C
+constexpr int     XCP_MAG_OFFSET  = 180;        // magnetometer sub-block at 0xB4
+constexpr int     XCP_GNSS_OFFSET = 204;        // GNSS sub-block at 0xCC
 
 constexpr int     TIMEOUT_MS     = 500;
 }
@@ -365,6 +367,15 @@ void XcpClient::parseNamedFields()
         parseAhrs(d + XCP_AHRS_OFFSET);
     if (m_blockSize >= XCP_SYS_OFFSET + 56)
         parseSys(d + XCP_SYS_OFFSET);
+
+    // Magnetometer and GNSS: only the presence byte gets a named field, for
+    // the footer's lamps. Guarded on the block size like the sub-blocks above,
+    // so firmware built before these existed reports "not present" rather than
+    // reading past the end of the block.
+    m_accum.magPresent  = (m_blockSize > XCP_MAG_OFFSET)
+                          && quint8(d[XCP_MAG_OFFSET]) != 0;
+    m_accum.gnssPresent = (m_blockSize > XCP_GNSS_OFFSET)
+                          && quint8(d[XCP_GNSS_OFFSET]) != 0;
 
     m_verMajor = m_accum.verMajor;      // cached for DAQ frames, which carry
     m_verMinor = m_accum.verMinor;      // no version of their own
