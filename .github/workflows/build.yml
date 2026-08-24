@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+# Least privilege: this job only reads the checkout and uploads an
+# artifact, neither of which needs write access to the repository.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-latest
