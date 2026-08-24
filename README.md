@@ -30,6 +30,14 @@ the firmware is nothing more than a new A2L entry here.
 The MF4 recording is deliberately standard-conforming, so measurement files can
 be evaluated without this tool — with asammdf, for instance.
 
+![Sensors tab showing live IMU, barometer, magnetometer and GNSS values read from the ECU](docs/img/sensors-tab.png)
+
+*Sensors tab — the groups are built at runtime from the loaded A2L.*
+
+![Plot and Log tab with several live signal traces](docs/img/plot-tab.png)
+
+*Plot & Log — freely configured plots over live XCP polling, recordable as MF4.*
+
 ---
 
 ## Requirements (Windows)
