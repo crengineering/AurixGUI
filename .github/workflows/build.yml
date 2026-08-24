@@ -27,6 +27,23 @@ jobs:
       - name: Deploy Qt DLLs
         run: windeployqt --release build/Release/SerialMonitor.exe
 
+      # Qt is used under LGPL-3.0 and is shipped as unmodified DLLs next to the
+      # executable. LGPL-3.0 section 4 requires that a binary distribution carry
+      # a prominent notice naming the library, plus copies of the LGPL and the
+      # GPL it incorporates. The uploaded artifact is such a distribution once
+      # this repository is public, so the paperwork travels with it.
+      - name: Bundle license texts with the artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp LICENSE     build/Release/LICENSE.txt
+          cp NOTICE.txt  build/Release/NOTICE.txt
+          curl -fsSL --retry 3 https://www.gnu.org/licenses/lgpl-3.0.txt \
+               -o build/Release/LICENSE.LGPL-3.0.txt
+          curl -fsSL --retry 3 https://www.gnu.org/licenses/gpl-3.0.txt \
+               -o build/Release/LICENSE.GPL-3.0.txt
+          ls -l build/Release/*.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

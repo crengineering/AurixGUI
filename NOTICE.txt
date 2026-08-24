@@ -1,0 +1,61 @@
+THIRD-PARTY NOTICE
+==================
+
+This application (AurixGUI, built as SerialMonitor.exe) is distributed under the
+MIT license; see LICENSE. It uses third-party software as described below.
+
+
+Qt 6
+----
+
+This product includes the Qt framework, and its use is covered by the GNU Lesser
+General Public License version 3 (LGPL-3.0).
+
+    Copyright (C) The Qt Company Ltd. and other contributors.
+    https://www.qt.io/
+
+Modules used: Qt6Widgets, Qt6SerialPort, Qt6Network, Qt6Concurrent, Qt6Gui,
+Qt6Core, and the platform plugins deployed alongside them.
+
+No Qt module under a GPL-only or commercial-only license is used. In particular
+Qt Charts and Qt Data Visualization are NOT used -- the plot rendering in this
+application (plotwidget.cpp, plotpane.cpp) is original work.
+
+License texts accompanying this distribution:
+
+    LICENSE.LGPL-3.0.txt    GNU Lesser General Public License, version 3
+    LICENSE.GPL-3.0.txt     GNU General Public License, version 3
+                            (referenced by, and incorporated into, the LGPL)
+
+Qt is linked DYNAMICALLY. The Qt libraries are shipped unmodified as separate
+DLL files next to the executable, exactly as produced by the Qt deployment tool
+`windeployqt`. They have not been patched, statically linked, or otherwise
+altered.
+
+You may therefore replace the Qt libraries used by this application with your
+own build of Qt: obtain the Qt sources, build the corresponding modules with a
+compatible compiler and ABI, and replace the matching DLL files in this
+directory. The application will then run against your build. This is the
+relinking right granted by LGPL-3.0 section 4.
+
+Corresponding Qt source code for the version used is available from The Qt
+Company at https://download.qt.io/ and from the public repository at
+https://code.qt.io/cgit/qt/qtbase.git/ . The exact version is recorded in the
+build workflow (.github/workflows/build.yml) and can be read from the deployed
+DLLs.
+
+
+Fonts and other assets
+----------------------
+
+None. The application ships no third-party fonts, icons or images; the icon
+resources (appicon.h, lampicon.h, aui.ico) are original work.
+
+
+Trademarks
+----------
+
+Qt(R) is a registered trademark of The Qt Company Ltd. AURIX(TM), TriCore(TM)
+and Infineon(R) are trademarks of Infineon Technologies AG. XCP, A2L and MF4 are
+standards of ASAM e.V. All are named descriptively and imply no affiliation
+with, or endorsement by, those organisations.
