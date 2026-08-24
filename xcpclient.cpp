@@ -29,16 +29,13 @@ constexpr quint32 XCP_DATA_MAGIC = 0x41555258;  // must match Measurements.h
 // byte. Applies to both a SHORT_UPLOAD response and a DAQ ODT.
 constexpr int     XCP_CHUNK_MAX  = 63;
 
-// Offsets of the sub-structures inside Xcp_Data, used ONLY by the named-field
-// convenience layer (parseNamedFields) that feeds the footer and the older
-// tabs. The transport no longer knows about them: it moves the whole block in
-// XCP_CHUNK_MAX-sized pieces whose count comes from the A2L. Anything described
-// in the A2L is read straight out of Measurements::raw and needs nothing here.
-constexpr int     XCP_IMU_OFFSET  = 52;         // IMU sub-block at 0x34
-constexpr int     XCP_AHRS_OFFSET = 84;         // attitude sub-block at 0x54
-constexpr int     XCP_SYS_OFFSET  = 124;        // core + Ethernet stats at 0x7C
-constexpr int     XCP_MAG_OFFSET  = 180;        // magnetometer sub-block at 0xB4
-constexpr int     XCP_GNSS_OFFSET = 204;        // GNSS sub-block at 0xCC
+// Sizes of the sub-blocks the named-field convenience layer decodes. Their
+// OFFSETS are not constants any more -- they come from the A2L via
+// XcpClient::Layout, because the firmware reorders this block whenever a
+// peripheral is added or removed. Only the internal shape of each sub-block is
+// fixed, and that is what these sizes describe.
+constexpr int     XCP_IMU_SIZE = 32;            // present u8 (+3 pad) + 7 floats
+constexpr int     XCP_SYS_SIZE = 56;            // 6xu32 + 6xu16 + 6xu16 + eth
 
 constexpr int     TIMEOUT_MS     = 500;
 }
@@ -293,27 +290,6 @@ void XcpClient::storeRaw(int offset, const char *d, int len)
         std::memcpy(m_accum.raw.data() + offset, d, size_t(len));
 }
 
-void XcpClient::parseAhrs(const char *d)
-{
-    // 40-byte attitude sub-block: state u8, accOk u8 (+2 pad), then 9 floats.
-    auto readF = [d](int off) {
-        float f = 0.0f;
-        std::memcpy(&f, d + off, sizeof(f));
-        return f;
-    };
-    m_accum.ahrsState = quint8(d[0]);
-    m_accum.ahrsAccOk = (quint8(d[1]) != 0);
-    m_accum.roll   = readF(4);
-    m_accum.pitch  = readF(8);
-    m_accum.yaw    = readF(12);
-    m_accum.rateP  = readF(16);
-    m_accum.rateQ  = readF(20);
-    m_accum.rateR  = readF(24);
-    m_accum.biasX  = readF(28);
-    m_accum.biasY  = readF(32);
-    m_accum.biasZ  = readF(36);
-}
-
 void XcpClient::parseSys(const char *d)
 {
     // 56-byte system block: 6x u32 exec time, 6x u16 load, 6x u16 alive,
@@ -361,21 +337,26 @@ void XcpClient::parseNamedFields()
     m_accum.baroTempC   = readF(44);
     m_accum.baroAltM    = readF(48);
 
-    if (m_blockSize >= XCP_IMU_OFFSET + 32)
-        parseImu(d + XCP_IMU_OFFSET);
-    if (m_blockSize >= XCP_AHRS_OFFSET + 40)
-        parseAhrs(d + XCP_AHRS_OFFSET);
-    if (m_blockSize >= XCP_SYS_OFFSET + 56)
-        parseSys(d + XCP_SYS_OFFSET);
+    // Sub-blocks sit wherever the A2L says they do. An offset of -1 (the block
+    // is not in the A2L) or one the fetched block does not cover leaves the
+    // fields at their defaults -- "no such peripheral" -- rather than decoding
+    // whatever else happens to live there.
+    auto covers = [this](int off, int size) {
+        return off >= 0 && off + size <= m_blockSize;
+    };
+
+    if (covers(m_layout.imu, XCP_IMU_SIZE))
+        parseImu(d + m_layout.imu);
+    if (covers(m_layout.sys, XCP_SYS_SIZE))
+        parseSys(d + m_layout.sys);
 
     // Magnetometer and GNSS: only the presence byte gets a named field, for
-    // the footer's lamps. Guarded on the block size like the sub-blocks above,
-    // so firmware built before these existed reports "not present" rather than
-    // reading past the end of the block.
-    m_accum.magPresent  = (m_blockSize > XCP_MAG_OFFSET)
-                          && quint8(d[XCP_MAG_OFFSET]) != 0;
-    m_accum.gnssPresent = (m_blockSize > XCP_GNSS_OFFSET)
-                          && quint8(d[XCP_GNSS_OFFSET]) != 0;
+    // the footer's lamps. Everything else about them is A2L-described and read
+    // straight out of raw.
+    m_accum.magPresent  = covers(m_layout.mag, 1)
+                          && quint8(d[m_layout.mag]) != 0;
+    m_accum.gnssPresent = covers(m_layout.gnss, 1)
+                          && quint8(d[m_layout.gnss]) != 0;
 
     m_verMajor = m_accum.verMajor;      // cached for DAQ frames, which carry
     m_verMinor = m_accum.verMinor;      // no version of their own

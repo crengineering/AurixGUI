@@ -101,12 +101,12 @@ private:
     QLabel         *m_vddLbl     = nullptr;
     QLabel         *m_vddp3Lbl   = nullptr;
     QLabel         *m_vextLbl    = nullptr;
-    QLabel         *m_baroPressLbl = nullptr;   // BMP388 pressure
-    QLabel         *m_baroTempLbl  = nullptr;   // BMP388 temperature
+    QLabel         *m_baroPressLbl = nullptr;   // BMP581 pressure
+    QLabel         *m_baroTempLbl  = nullptr;   // BMP581 temperature
     QLabel         *m_baroAltLbl   = nullptr;   // pressure altitude
-    QLabel         *m_imuAccelLbl  = nullptr;   // MPU-6050 accel x/y/z [g]
-    QLabel         *m_imuGyroLbl   = nullptr;   // MPU-6050 gyro x/y/z [deg/s]
-    QLabel         *m_imuTempLbl   = nullptr;   // MPU-6050 die temperature
+    QLabel         *m_imuAccelLbl  = nullptr;   // ICM-42688-P accel x/y/z [g]
+    QLabel         *m_imuGyroLbl   = nullptr;   // ICM-42688-P gyro x/y/z [deg/s]
+    QLabel         *m_imuTempLbl   = nullptr;   // ICM-42688-P die temperature
     QPlainTextEdit *m_log        = nullptr;
 
     // diagnostics tab

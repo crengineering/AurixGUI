@@ -245,10 +245,10 @@ QWidget *XcpPanel::buildLiveTab()
     form->addRow("VDD 1.25 V:",             m_vddLbl);
     form->addRow("VDDP3 3.3 V:",            m_vddp3Lbl);
     form->addRow("VEXT 5 V:",               m_vextLbl);
-    form->addRow("Baro pressure (BMP388):", m_baroPressLbl);
+    form->addRow("Baro pressure (BMP581):", m_baroPressLbl);
     form->addRow("Baro temperature:",       m_baroTempLbl);
     form->addRow("Baro altitude:",          m_baroAltLbl);
-    form->addRow("IMU accel (MPU-6050):",   m_imuAccelLbl);
+    form->addRow("IMU accel (ICM-42688-P):", m_imuAccelLbl);
     form->addRow("IMU gyro:",               m_imuGyroLbl);
     form->addRow("IMU temperature:",        m_imuTempLbl);
 
@@ -284,9 +284,10 @@ struct SensorGroup { const char *title; const char *prefix; };
 
 const SensorGroup kSensorGroups[] = {
     { "Onboard (die temperature, supply rails)", ""      },  // catch-all, matched last
-    { "Barometer - BMP388",                      "Baro"  },
-    { "IMU - MPU-6050",                          "Imu"   },
-    { "Attitude estimate - AHRS",                "Ahrs"  },
+    { "Barometer - BMP581",                      "Baro"  },
+    { "IMU - ICM-42688-P",                       "Imu"   },
+    { "Magnetometer - MMC5983MA",                "Mag"   },
+    { "GNSS - NEO-M9N",                          "Gnss"  },
     { "Core load",                               "Core"  },
     { "Ethernet",                                "Eth"   },
 };
@@ -623,6 +624,24 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
     const QVector<A2lMeas> meas = A2lModel::parseMeasurements(path, &measErr);
     if (!meas.isEmpty())
         m_meas = meas;
+
+    // Tell the client where the sub-blocks it decodes by hand actually sit.
+    // The A2L is generated from the firmware's C structs, so this follows the
+    // board across a layout change instead of going quietly stale -- which is
+    // what happened when the attitude block was removed and every offset below
+    // it shifted by 40 bytes.
+    XcpClient::Layout layout;
+    auto offsetOf = [this](const char *name) {
+        for (const A2lMeas &mm : m_meas)
+            if (mm.name == QLatin1String(name))
+                return int(mm.addr - XCP_DATA_ADDR);
+        return -1;
+    };
+    layout.imu  = offsetOf("ImuPresent");
+    layout.sys  = offsetOf("Core0ExecTime");
+    layout.mag  = offsetOf("MagPresent");
+    layout.gnss = offsetOf("GnssPresent");
+    m_client->setLayout(layout);
 
     if (m_log)
         m_log->appendPlainText(QString("[A2L loaded: %1 characteristics, %2 measurements from %3]")
@@ -1600,13 +1619,19 @@ void XcpPanel::pollTick()
     m_client->pollMeasurements(XCP_DATA_ADDR, measurementBlockSize());
 }
 
-// Bytes of Xcp_Data the loaded A2L describes. Falls back to a size that covers
-// the fields parseNamedFields() needs for the footer, so a missing or truncated
-// A2L degrades to the built-in signals instead of showing nothing at all.
+// Bytes of Xcp_Data the loaded A2L describes. Without an A2L, fall back to the
+// leading block that is fixed by the protocol itself -- magic, version, uptime,
+// rails, diagnostics and barometer, all anchored at offset 0 -- so the Live tab
+// and the footer still show something. The sub-blocks past it are located by
+// name (see loadA2l), so reading further would only fetch bytes nothing can
+// decode; the old 180-byte floor was the block length of a firmware two
+// peripherals ago.
+constexpr int XCP_BASE_BLOCK = 52;
+
 int XcpPanel::measurementBlockSize() const
 {
     const int fromA2l = A2lModel::blockExtent(m_meas, XCP_DATA_ADDR);
-    return qMax(fromA2l, 180);
+    return qMax(fromA2l, XCP_BASE_BLOCK);
 }
 
 void XcpPanel::setConnectedState(bool connected)

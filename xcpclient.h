@@ -30,31 +30,18 @@ public:
         float   vddp3      = 0.0f;  // 3.3 V rail [V]
         float   vext       = 0.0f;  // 5 V board supply [V]
         quint32 diagStatus = 0;     // diagnostics bitmask (DIAGNOSTICS.md)
-        float   baroPressPa = 0.0f; // BMP388 pressure [Pa]
-        float   baroTempC   = 0.0f; // BMP388 temperature [degC]
+        float   baroPressPa = 0.0f; // BMP581 pressure [Pa]
+        float   baroTempC   = 0.0f; // BMP581 temperature [degC]
         float   baroAltM    = 0.0f; // pressure altitude [m]
-        bool    baroPresent = false;// BMP388 answered at init
-        float   accelX      = 0.0f; // MPU-6050 acceleration [g]
+        bool    baroPresent = false;// BMP581 answered at init
+        float   accelX      = 0.0f; // ICM-42688-P acceleration [g]
         float   accelY      = 0.0f;
         float   accelZ      = 0.0f;
-        float   gyroX       = 0.0f; // MPU-6050 angular rate [deg/s]
+        float   gyroX       = 0.0f; // ICM-42688-P angular rate [deg/s]
         float   gyroY       = 0.0f;
         float   gyroZ       = 0.0f;
-        float   imuTempC    = 0.0f; // MPU-6050 die temperature [degC]
-        bool    imuPresent  = false;// MPU-6050 answered at init
-
-        // attitude estimate (Ahrs.c) - flight_ctrl.h conventions
-        quint8  ahrsState   = 0;    // 0 calibrating, 1 running, 2 no sensor
-        bool    ahrsAccOk   = false;// |a| ~= 1 g, accel being trusted
-        float   roll        = 0.0f; // phi   [rad]
-        float   pitch       = 0.0f; // theta [rad]
-        float   yaw         = 0.0f; // psi   [rad], drifts (gyro-only)
-        float   rateP       = 0.0f; // p [rad/s]
-        float   rateQ       = 0.0f; // q [rad/s]
-        float   rateR       = 0.0f; // r [rad/s]
-        float   biasX       = 0.0f; // measured gyro bias [deg/s]
-        float   biasY       = 0.0f;
-        float   biasZ       = 0.0f;
+        float   imuTempC    = 0.0f; // ICM-42688-P die temperature [degC]
+        bool    imuPresent  = false;// ICM-42688-P answered at init
 
         // Peripherals whose only named field is the presence flag: the samples
         // themselves are A2L-described and read straight out of raw, so nothing
@@ -79,6 +66,25 @@ public:
 
         bool    valid      = false; // magic word matched
     };
+
+    // Byte offsets of the sub-blocks inside Xcp_Data, resolved from the A2L by
+    // MEASUREMENT name (see XcpPanel::loadA2l). They used to be constants in
+    // xcpclient.cpp, which is exactly how the footer broke when the firmware
+    // dropped the 40-byte attitude block on 2026-08-22: every offset below it
+    // shifted and nothing here noticed, so the core-load bars and the Ethernet
+    // counters were decoding whatever now sat at the old addresses.
+    //
+    // -1 means "the A2L does not describe this block", and the matching named
+    // fields then keep their defaults instead of being filled from the wrong
+    // bytes. The base fields (magic, version, rails, barometer) are not listed:
+    // they are anchored at offset 0 by the magic word and have never moved.
+    struct Layout {
+        int imu  = -1;   // ImuPresent    - 32-byte IMU sub-block
+        int sys  = -1;   // Core0ExecTime - 56-byte core + Ethernet block
+        int mag  = -1;   // MagPresent    - presence byte only
+        int gnss = -1;   // GnssPresent   - presence byte only
+    };
+    void setLayout(const Layout &layout) { m_layout = layout; }
 
     explicit XcpClient(QObject *parent = nullptr);
 
@@ -138,7 +144,6 @@ private:
     void handleResponse(const QByteArray &packet);
     void handleDaqFrame(const QByteArray &packet);
     void parseImu(const char *d);   // fill m_accum IMU fields from a 32-byte block
-    void parseAhrs(const char *d);  // fill m_accum attitude fields (40-byte block)
     void parseSys(const char *d);   // fill m_accum core/Ethernet stats (56-byte block)
     void storeRaw(int offset, const char *d, int len);  // mirror into m_accum.raw
     void dropConnection(const QString &reason);
@@ -170,6 +175,7 @@ private:
     // Running measurement state assembled across the poll chunks / DAQ ODTs
     // before a single measurementsReceived() is emitted.
     Measurements    m_accum;
+    Layout          m_layout;           // sub-block offsets, from the A2L
     quint32         m_blockBase = 0;    // Xcp_Data base address
     int             m_blockSize = 0;    // bytes to fetch, from the A2L
     int             m_lastOdt   = 0;    // highest ODT index in use

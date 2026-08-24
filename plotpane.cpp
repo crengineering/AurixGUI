@@ -23,14 +23,15 @@ QString groupTitleFor(const QString &name)
 {
     if (name.startsWith("Baro")) return QStringLiteral("Barometer");
     if (name.startsWith("Imu"))  return QStringLiteral("IMU");
-    if (name.startsWith("Ahrs")) return QStringLiteral("Attitude");
+    if (name.startsWith("Mag"))  return QStringLiteral("Magnetometer");
+    if (name.startsWith("Gnss")) return QStringLiteral("GNSS");
     if (name.startsWith("Core")) return QStringLiteral("Core load");
     if (name.startsWith("Eth"))  return QStringLiteral("Ethernet");
     return QStringLiteral("Onboard");
 }
 
-const char *kGroupOrder[] = { "Onboard", "Barometer", "IMU", "Attitude",
-                              "Core load", "Ethernet" };
+const char *kGroupOrder[] = { "Onboard", "Barometer", "IMU", "Magnetometer",
+                              "GNSS", "Core load", "Ethernet" };
 } // namespace
 
 PlotPane::PlotPane(int index, const QVector<A2lMeas> &available, QWidget *parent)
@@ -121,7 +122,7 @@ void PlotPane::append(double t, const QByteArray &raw, bool baroPresent, bool im
         // A missing sensor reports zeros; plotting them would look like data.
         if (!baroPresent && m.name.startsWith("Baro"))
             continue;
-        if (!imuPresent && (m.name.startsWith("Imu") || m.name.startsWith("Ahrs")))
+        if (!imuPresent && m.name.startsWith("Imu"))
             continue;
 
         double v = 0.0;
