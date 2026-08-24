@@ -1,3 +1,14 @@
 build/
 .vscode/
 *.user
+
+# Vendor datasheets/manuals - copyrighted, must not be redistributed
+*.pdf
+
+# Measurement logs recorded by the GUI
+*.mf4
+
+# Qt / CMake build artefacts
+build*/
+CMakeLists.txt.user*
+*.autosave
