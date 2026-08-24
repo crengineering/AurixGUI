@@ -102,7 +102,8 @@ lampicon.h          per-tab status lamps
 ## License
 
 [MIT](LICENSE) © 2026 Chris Riedl. Every source file checked in here is original
-work; no third-party code is vendored.
+work; no third-party code is vendored. The third-party notice that ships with a
+built binary is [NOTICE.txt](NOTICE.txt).
 
 The application links against **Qt 6** (Widgets, SerialPort, Network,
 Concurrent), which is not part of this repository and is used under the
