@@ -37,7 +37,11 @@ public:
     // Feed one sample. raw is the firmware measurement block; sensorPresent
     // lets the caller suppress signals whose sensor is missing, so they are not
     // drawn as a flat zero line.
-    void append(double t, const QByteArray &raw, bool baroPresent, bool imuPresent);
+    // Takes every fetched block, not one buffer: a selected signal may live in
+    // any of them, and passing only Xcp_Data is what kept the navigation
+    // signals off the plot even after the transport was fetching them.
+    void append(double t, const QVector<quint32> &bases,
+                const QVector<QByteArray> &raws, bool baroPresent, bool imuPresent);
 
     void clearData();
 

@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <QHash>
+#include <QMap>
 #include <QtEndian>
 #include <cstring>
 
@@ -225,6 +226,45 @@ bool A2lModel::decode(const QByteArray &raw, quint32 blockBase,
     case A2lType::Uint8:   *out = double(quint8(*d));                    break;
     }
     return true;
+}
+
+QVector<A2lModel::BlockRange> A2lModel::blockRanges(const QVector<A2lMeas> &meas)
+{
+    // Group by the 256-byte-aligned base, which is how the firmware pins them.
+    // QMap rather than QHash: it iterates in key order, so the ranges come out
+    // sorted by address and the DAQ ODTs are laid out in a predictable order.
+    QMap<quint32, int> extents;
+
+    for (const A2lMeas &m : meas) {
+        const quint32 base = m.addr & ~quint32(0xFF);
+        const int     end  = int(m.addr - base) + a2lTypeSize(m.type);
+
+        if (end > extents.value(base, 0))
+            extents[base] = end;
+    }
+
+    QVector<BlockRange> ranges;
+    ranges.reserve(int(extents.size()));
+    for (auto it = extents.constBegin(); it != extents.constEnd(); ++it)
+        ranges.append(BlockRange{it.key(), it.value()});
+
+    return ranges;
+}
+
+bool A2lModel::decodeFrom(const QVector<quint32> &bases,
+                          const QVector<QByteArray> &raws,
+                          const A2lMeas &m, double *out)
+{
+    for (int i = 0; i < bases.size() && i < raws.size(); ++i) {
+        const quint32 base = bases[i];
+        if (m.addr < base)
+            continue;
+        const int end = int(m.addr - base) + a2lTypeSize(m.type);
+        if (end > raws[i].size())
+            continue;                       // a later block, or past this one
+        return decode(raws[i], base, m, out);
+    }
+    return false;
 }
 
 int A2lModel::blockExtent(const QVector<A2lMeas> &meas, quint32 blockBase,

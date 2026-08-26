@@ -25,6 +25,9 @@ QString groupTitleFor(const QString &name)
     if (name.startsWith("Imu"))  return QStringLiteral("IMU");
     if (name.startsWith("Mag"))  return QStringLiteral("Magnetometer");
     if (name.startsWith("Gnss")) return QStringLiteral("GNSS");
+    if (name.startsWith("Att"))  return QStringLiteral("Attitude");
+    if (name.startsWith("Nav"))  return QStringLiteral("Navigation");
+    if (name.startsWith("Ctrl")) return QStringLiteral("Flight control");
     if (name.startsWith("Core")) return QStringLiteral("Core load");
     if (name.startsWith("Eth"))  return QStringLiteral("Ethernet");
     return QStringLiteral("Onboard");
@@ -112,9 +115,11 @@ void PlotPane::rebuildSeries()
                                .arg(m_selected.size()));
 }
 
-void PlotPane::append(double t, const QByteArray &raw, bool baroPresent, bool imuPresent)
+void PlotPane::append(double t, const QVector<quint32> &bases,
+                      const QVector<QByteArray> &raws,
+                      bool baroPresent, bool imuPresent)
 {
-    if (raw.isEmpty())
+    if (raws.isEmpty())
         return;
 
     for (int i = 0; i < m_selected.size() && i < m_series.size(); ++i) {
@@ -126,7 +131,7 @@ void PlotPane::append(double t, const QByteArray &raw, bool baroPresent, bool im
             continue;
 
         double v = 0.0;
-        if (A2lModel::decode(raw, XCP_DATA_ADDR, m, &v))
+        if (A2lModel::decodeFrom(bases, raws, m, &v))
             m_plot->appendPoint(m_series[i], t, v);
     }
 }

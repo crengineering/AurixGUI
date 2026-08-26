@@ -62,7 +62,16 @@ public:
         // Raw copy of Xcp_Data, so anything described in the A2L can be
         // decoded generically by (ECU_ADDRESS - XCP_DATA_ADDR) without the
         // client needing a named field for it. Empty until the first poll.
+        // This is blockRaw[0]; it stays for the named-field helpers and the
+        // footer, which only ever look at Xcp_Data.
         QByteArray raw;
+
+        // Every measurement block, in A2L address order, with the base each
+        // buffer starts at. A signal is decoded against whichever block
+        // contains its ECU_ADDRESS -- see A2lModel::decodeIn. This is what
+        // makes a second block (Xcp_Fusion at 0x70030500) visible at all.
+        QVector<quint32>   blockBase;
+        QVector<QByteArray> blockRaw;
 
         bool    valid      = false; // magic word matched
     };
@@ -95,7 +104,13 @@ public:
     // Cyclic read of the whole measurement block. blockSize comes from the A2L
     // (A2lModel::blockExtent), so the transport never needs to know which
     // peripherals exist -- it just moves N bytes in MAX_CTO-sized chunks.
-    void pollMeasurements(quint32 address, int blockSize);
+    // A block of firmware memory to fetch: absolute base and length in bytes.
+    struct Block { quint32 base = 0; int size = 0; };
+
+    // Cyclic read of every measurement block. The set comes from the A2L
+    // (A2lModel::blockRanges), so the transport never needs to know which
+    // blocks exist -- it just moves their bytes in MAX_CTO-sized chunks.
+    void pollMeasurements(const QVector<Block> &blocks);
     void readMemory(quint32 address, quint8 len);     // -> memoryRead()
     void writeMemory(quint32 address, const QByteArray &data); // -> memoryWritten()
 
@@ -110,7 +125,7 @@ public:
     // per-peripheral branch to forget. (Forgetting one is exactly what made the
     // magnetometer read a constant 0 for a while: its ODT was allocated, the
     // frames arrived, and nothing stored them.)
-    void startDaq(quint32 baseAddress, int blockSize);
+    void startDaq(const QVector<Block> &blocks);
     bool daqActive() const { return m_daqActive; }
 
 signals:
@@ -134,7 +149,8 @@ private:
         ReqType    type;
         QByteArray packet;
         quint32    addr = 0;
-        int        off  = 0;      // PollChunk: offset into the block
+        int        blockIdx = 0;  // PollChunk: which block the bytes belong to
+        int        off  = 0;      // PollChunk: offset within that block
         int        len  = 0;      // PollChunk: bytes requested
         bool       last = false;  // PollChunk: emit after storing this one
     };
@@ -145,7 +161,7 @@ private:
     void handleDaqFrame(const QByteArray &packet);
     void parseImu(const char *d);   // fill m_accum IMU fields from a 32-byte block
     void parseSys(const char *d);   // fill m_accum core/Ethernet stats (56-byte block)
-    void storeRaw(int offset, const char *d, int len);  // mirror into m_accum.raw
+    void storeRaw(int blockIdx, int offset, const char *d, int len);
     void dropConnection(const QString &reason);
 
     // Fill the named Measurements fields from the assembled m_accum.raw. Only a
@@ -154,8 +170,20 @@ private:
     // needs nothing here.
     void parseNamedFields();
 
-    // Byte extents of the ODT / SHORT_UPLOAD chunks the block is split into.
-    QVector<QPair<int, int>> blockChunks() const;   // (offset, length)
+    // One ODT / SHORT_UPLOAD worth of bytes. Carries the ABSOLUTE address as
+    // well as the block it belongs to, so the same list drives the poll, the
+    // DAQ setup and the DAQ receive path across any number of blocks -- which
+    // is what keeps those three from disagreeing.
+    struct Chunk {
+        quint32 addr = 0;       // absolute, for SHORT_UPLOAD / WRITE_DAQ
+        int     blockIdx = 0;   // which m_raws buffer it lands in
+        int     off = 0;        // offset within that buffer
+        int     len = 0;
+    };
+    QVector<Chunk> blockChunks() const;
+
+    // Adopt a block set and size the receive buffers to it.
+    void setBlocks(const QVector<Block> &blocks);
 
     QUdpSocket     *m_socket  = nullptr;
     QTimer         *m_timeout = nullptr;
@@ -176,8 +204,10 @@ private:
     // before a single measurementsReceived() is emitted.
     Measurements    m_accum;
     Layout          m_layout;           // sub-block offsets, from the A2L
-    quint32         m_blockBase = 0;    // Xcp_Data base address
-    int             m_blockSize = 0;    // bytes to fetch, from the A2L
+    QVector<Block>  m_blocks;           // every block to fetch, from the A2L
+    QVector<QByteArray> m_raws;         // one assembled buffer per block
+    quint32         m_blockBase = 0;    // m_blocks[0].base - the named-field
+    int             m_blockSize = 0;    // block, kept for parseNamedFields()
     int             m_lastOdt   = 0;    // highest ODT index in use
 };
 

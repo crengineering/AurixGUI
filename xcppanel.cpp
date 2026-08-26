@@ -288,6 +288,9 @@ const SensorGroup kSensorGroups[] = {
     { "IMU - ICM-42688-P",                       "Imu"   },
     { "Magnetometer - MMC5983MA",                "Mag"   },
     { "GNSS - NEO-M9N",                          "Gnss"  },
+    { "Attitude - roll / pitch / yaw",           "Att"   },
+    { "Navigation - position, velocity, biases", "Nav"   },
+    { "Flight control feedback (rad, body)",     "Ctrl"  },
     { "Core load",                               "Core"  },
     { "Ethernet",                                "Eth"   },
 };
@@ -385,7 +388,7 @@ void XcpPanel::updateSensorValues(const XcpClient::Measurements &m)
             continue;
 
         double v = 0.0;
-        if (!A2lModel::decode(m.raw, XCP_DATA_ADDR, m_meas[i], &v)) {
+        if (!A2lModel::decodeFrom(m.blockBase, m.blockRaw, m_meas[i], &v)) {
             lbl->setText("-");
             continue;
         }
@@ -488,10 +491,17 @@ QWidget *XcpPanel::buildDiagTab()
 
 QWidget *XcpPanel::buildCalTab()
 {
-    m_calTable = new QTableWidget(0, 4);
-    m_calTable->setHorizontalHeaderLabels({"Parameter", "Unit", "Value", ""});
+    // A "Description" column, not just a tooltip. These parameters change the
+    // behaviour of an estimator, and a name like FusSigmaAccDown says nothing
+    // about what raising it does -- the A2L already carries that prose, so show
+    // it rather than making the reader hover over every row to find out.
+    m_calTable = new QTableWidget(0, 5);
+    m_calTable->setHorizontalHeaderLabels({"Parameter", "Description", "Unit",
+                                           "Value", ""});
     m_calTable->verticalHeader()->setVisible(false);
-    m_calTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_calTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_calTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_calTable->setWordWrap(true);
 
     m_calReadBtn   = new QPushButton("Read all");
     m_calExportBtn = new QPushButton("Export...");
@@ -549,16 +559,20 @@ void XcpPanel::rebuildCalTable()
         name->setFlags(name->flags() & ~Qt::ItemIsEditable);
         if (!c.desc.isEmpty())
             name->setToolTip(c.desc);
+        auto *desc = new QTableWidgetItem(c.desc);
+        desc->setFlags(desc->flags() & ~Qt::ItemIsEditable);
+        desc->setToolTip(c.desc);
         auto *unit = new QTableWidgetItem(c.unit);
         unit->setFlags(unit->flags() & ~Qt::ItemIsEditable);
         m_calTable->setItem(i, 0, name);
-        m_calTable->setItem(i, 1, unit);
-        m_calTable->setItem(i, 2, new QTableWidgetItem("-"));   // editable
+        m_calTable->setItem(i, 1, desc);
+        m_calTable->setItem(i, 2, unit);
+        m_calTable->setItem(i, 3, new QTableWidgetItem("-"));   // editable
 
         auto *writeBtn = new QPushButton("Write");
         writeBtn->setEnabled(connected);
         connect(writeBtn, &QPushButton::clicked, this, [this, i]() { writeCalRow(i); });
-        m_calTable->setCellWidget(i, 3, writeBtn);
+        m_calTable->setCellWidget(i, 4, writeBtn);
         m_calRowBtns.append(writeBtn);
     }
 
@@ -1054,9 +1068,9 @@ void XcpPanel::onConnected(const QString &ident)
     readCalibration();                          // populate the calibration tab
     // How many bytes to move comes from the A2L, not from a constant here: add
     // a MEASUREMENT and both the poll and the DAQ list grow to cover it.
-    const int blockSize = measurementBlockSize();
-    m_client->pollMeasurements(XCP_DATA_ADDR, blockSize);  // one poll: version + magic
-    m_client->startDaq(XCP_DATA_ADDR, blockSize);          // then event-driven streaming
+    const QVector<XcpClient::Block> blocks = measurementBlocks();
+    m_client->pollMeasurements(blocks);   // one poll: version + magic
+    m_client->startDaq(blocks);           // then event-driven streaming
 }
 
 void XcpPanel::onDaqStarted()
@@ -1142,7 +1156,7 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
     const double t = double(m_timeBase.elapsed()) / 1000.0;
     m_lastDaqMs = m_timeBase.elapsed();
     for (PlotPane *pane : m_plotPanes)
-        pane->append(t, m.raw, m.baroPresent, m.imuPresent);
+        pane->append(t, m.blockBase, m.blockRaw, m.baroPresent, m.imuPresent);
 
     if (m_logging) {
         QVector<double> values;
@@ -1150,7 +1164,7 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
         for (int idx : m_logSel) {
             double v = 0.0;
             if (idx >= 0 && idx < m_signalIdx.size())
-                (void)A2lModel::decode(m.raw, XCP_DATA_ADDR, m_meas[m_signalIdx[idx]], &v);
+                (void)A2lModel::decodeFrom(m.blockBase, m.blockRaw, m_meas[m_signalIdx[idx]], &v);
             values.append(v);
         }
         m_mf4.append(double(m_timeBase.elapsed() - m_logStartMs) / 1000.0, values);
@@ -1478,8 +1492,8 @@ bool XcpPanel::populateCharsFromRead(quint32 base, const QByteArray &data)
         if (off + a2lTypeSize(c.type) > data.size())
             continue;
         const uchar *p = reinterpret_cast<const uchar *>(data.constData()) + off;
-        if (m_calTable->item(i, 2))
-            m_calTable->item(i, 2)->setText(formatCharValue(c, p));
+        if (m_calTable->item(i, 3))
+            m_calTable->item(i, 3)->setText(formatCharValue(c, p));
         any = true;
     }
     if (any)
@@ -1494,7 +1508,7 @@ void XcpPanel::writeCalRow(int row)
 
     const A2lChar &c = m_chars[row];
     bool ok = false;
-    const QByteArray bytes = encodeCharValue(c, m_calTable->item(row, 2)->text(), &ok);
+    const QByteArray bytes = encodeCharValue(c, m_calTable->item(row, 3)->text(), &ok);
     if (!ok) {
         m_log->appendPlainText(QString("[Invalid value for %1 - aborted]").arg(c.name));
         return;
@@ -1513,7 +1527,7 @@ void XcpPanel::exportCalibration()
     QJsonObject obj;
     for (int i = 0; i < m_chars.size(); ++i) {
         bool  ok = false;
-        const double v = m_calTable->item(i, 2)->text().replace(',', '.').toDouble(&ok);
+        const double v = m_calTable->item(i, 3)->text().replace(',', '.').toDouble(&ok);
         if (!ok) {
             m_log->appendPlainText(QString("[Export aborted: invalid value for %1]")
                                    .arg(m_chars[i].name));
@@ -1560,7 +1574,7 @@ void XcpPanel::importCalibration()
             const QString s = (c.type == A2lType::Float32)
                                   ? QString::number(d, 'g', 6)
                                   : QString::number(qint64(d));
-            m_calTable->item(i, 2)->setText(s);
+            m_calTable->item(i, 3)->setText(s);
             ++applied;
         }
     }
@@ -1616,7 +1630,7 @@ void XcpPanel::pollTick()
         }
         return;
     }
-    m_client->pollMeasurements(XCP_DATA_ADDR, measurementBlockSize());
+    m_client->pollMeasurements(measurementBlocks());
 }
 
 // Bytes of Xcp_Data the loaded A2L describes. Without an A2L, fall back to the
@@ -1632,6 +1646,30 @@ int XcpPanel::measurementBlockSize() const
 {
     const int fromA2l = A2lModel::blockExtent(m_meas, XCP_DATA_ADDR);
     return qMax(fromA2l, XCP_BASE_BLOCK);
+}
+
+// Every measurement block to fetch, derived from the A2L.
+//
+// Was a single hardcoded base until 2026-08-26, which is why every signal in
+// Xcp_Fusion (0x70030500) was invisible: parsed, listed in the picker, and
+// never fetched. Deriving the set means a new firmware block shows up without
+// a GUI change.
+QVector<XcpClient::Block> XcpPanel::measurementBlocks() const
+{
+    QVector<XcpClient::Block> blocks;
+
+    for (const A2lModel::BlockRange &r : A2lModel::blockRanges(m_meas))
+        blocks.append(XcpClient::Block{r.base, r.size});
+
+    if (blocks.isEmpty()) {
+        // No A2L loaded: fall back to the leading block the protocol itself
+        // fixes, so the Live tab and the footer still show something.
+        blocks.append(XcpClient::Block{XCP_DATA_ADDR, XCP_BASE_BLOCK});
+    } else if (blocks[0].base == XCP_DATA_ADDR) {
+        blocks[0].size = qMax(blocks[0].size, XCP_BASE_BLOCK);
+    }
+
+    return blocks;
 }
 
 void XcpPanel::setConnectedState(bool connected)

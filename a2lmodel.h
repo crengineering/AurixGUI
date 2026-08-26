@@ -79,6 +79,35 @@ public:
     // another block must not drag the fetch length across the gap.
     static int blockExtent(const QVector<A2lMeas> &meas, quint32 blockBase,
                            int limit = 256);
+
+    // One contiguous region of firmware memory that has to be fetched.
+    struct BlockRange {
+        quint32 base = 0;
+        int     size = 0;
+    };
+
+    // Every block the MEASUREMENTs live in, derived from their addresses.
+    //
+    // The firmware pins its blocks 256 bytes apart (Xcp_Data 0x70030000,
+    // Xcp_Fusion 0x70030500, ...), so grouping by the address with the low byte
+    // masked off recovers that layout without the GUI having to be told it.
+    //
+    // This exists because a hardcoded single base is a bug that recurs. The
+    // navigation state was added in its own block and every one of its signals
+    // was invisible here -- present in the A2L, parsed, listed, and never
+    // fetched, because the transport only ever asked for 0x70030000. Deriving
+    // the set means the next block appears on its own.
+    static QVector<BlockRange> blockRanges(const QVector<A2lMeas> &meas);
+
+    // Decode against whichever fetched block actually contains m.
+    //
+    // Takes the bases and buffers straight off XcpClient::Measurements, so a
+    // caller never has to know which block a signal lives in -- which is the
+    // whole point: the Sensors tab and the plot picker list signals from the
+    // A2L, and any of them may be in any block.
+    static bool decodeFrom(const QVector<quint32> &bases,
+                           const QVector<QByteArray> &raws,
+                           const A2lMeas &m, double *out);
 };
 
 #endif // A2LMODEL_H

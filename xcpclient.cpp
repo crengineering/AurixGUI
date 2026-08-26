@@ -92,17 +92,40 @@ void XcpClient::disconnectFromSlave()
     emit disconnected();
 }
 
-QVector<QPair<int, int>> XcpClient::blockChunks() const
+QVector<XcpClient::Chunk> XcpClient::blockChunks() const
 {
-    QVector<QPair<int, int>> chunks;
-    for (int off = 0; off < m_blockSize; off += XCP_CHUNK_MAX)
-        chunks.append({off, qMin(XCP_CHUNK_MAX, m_blockSize - off)});
+    QVector<Chunk> chunks;
+    for (int b = 0; b < m_blocks.size(); ++b) {
+        const Block &blk = m_blocks[b];
+        for (int off = 0; off < blk.size; off += XCP_CHUNK_MAX) {
+            Chunk c;
+            c.addr     = blk.base + quint32(off);
+            c.blockIdx = b;
+            c.off      = off;
+            c.len      = qMin(XCP_CHUNK_MAX, blk.size - off);
+            chunks.append(c);
+        }
+    }
     return chunks;
 }
 
-void XcpClient::pollMeasurements(quint32 address, int blockSize)
+void XcpClient::setBlocks(const QVector<Block> &blocks)
 {
-    if (!m_connected || blockSize <= 0)
+    m_blocks = blocks;
+    m_raws.resize(blocks.size());
+    for (int i = 0; i < blocks.size(); ++i)
+        if (m_raws[i].size() != blocks[i].size)
+            m_raws[i] = QByteArray(blocks[i].size, char(0));
+
+    // The first block is Xcp_Data. parseNamedFields() and the footer read it
+    // through m_accum.raw, so keep those two pointing at it.
+    m_blockBase = blocks.isEmpty() ? 0u : blocks[0].base;
+    m_blockSize = blocks.isEmpty() ? 0  : blocks[0].size;
+}
+
+void XcpClient::pollMeasurements(const QVector<Block> &blocks)
+{
+    if (!m_connected || blocks.isEmpty())
         return;
 
     // never let polls pile up behind a slow link
@@ -112,23 +135,22 @@ void XcpClient::pollMeasurements(quint32 address, int blockSize)
     if (m_busy && m_current.type == ReqType::PollChunk)
         return;
 
-    m_blockBase = address;
-    m_blockSize = blockSize;
+    setBlocks(blocks);
 
-    // The block exceeds MAX_CTO(64), so read it as consecutive SHORT_UPLOADs.
-    // The chunk count follows blockSize, which comes from the A2L -- nothing
-    // here names a peripheral, so a new measurement is covered automatically.
-    const QVector<QPair<int, int>> chunks = blockChunks();
+    // Blocks exceed MAX_CTO(64), so read them as consecutive SHORT_UPLOADs.
+    // The chunk list comes from the A2L via setBlocks() -- nothing here names a
+    // peripheral or a block, so a new one is covered automatically.
+    const QVector<Chunk> chunks = blockChunks();
     for (int i = 0; i < chunks.size(); ++i) {
-        const int off = chunks[i].first;
-        const int len = chunks[i].second;
+        const int len = chunks[i].len;
 
         QByteArray cmd(8, '\0');
         cmd[0] = char(CMD_SHORT_UPLOAD);
         cmd[1] = char(len);
-        qToLittleEndian<quint32>(address + quint32(off), cmd.data() + 4);
+        qToLittleEndian<quint32>(chunks[i].addr, cmd.data() + 4);
 
-        Request r{ReqType::PollChunk, cmd, address + quint32(off), off, len,
+        Request r{ReqType::PollChunk, cmd, chunks[i].addr,
+                  chunks[i].blockIdx, chunks[i].off, len,
                   (i == chunks.size() - 1)};
         enqueue(r);
     }
@@ -159,13 +181,12 @@ void XcpClient::writeMemory(quint32 address, const QByteArray &data)
     enqueue({ReqType::MemWrite, cmd, address});
 }
 
-void XcpClient::startDaq(quint32 baseAddress, int blockSize)
+void XcpClient::startDaq(const QVector<Block> &blocks)
 {
-    if (!m_connected || blockSize <= 0)
+    if (!m_connected || blocks.isEmpty())
         return;
 
-    m_blockBase = baseAddress;
-    m_blockSize = blockSize;
+    setBlocks(blocks);
 
     auto simple = [this](std::initializer_list<quint8> bytes) {
         QByteArray p;
@@ -193,7 +214,7 @@ void XcpClient::startDaq(quint32 baseAddress, int blockSize)
     // this list (the core-load footer read 0 % until ODT2/ODT3 were added, and
     // the magnetometer read a constant 0 because its frames had nowhere to go).
     // Deriving it removes that whole class.
-    const QVector<QPair<int, int>> chunks = blockChunks();
+    const QVector<Chunk> chunks = blockChunks();
     m_lastOdt = chunks.size() - 1;
 
     simple({CMD_FREE_DAQ});
@@ -204,8 +225,7 @@ void XcpClient::startDaq(quint32 baseAddress, int blockSize)
 
     for (int i = 0; i < chunks.size(); ++i) {
         simple({CMD_SET_DAQ_PTR, 0x00, 0x00, 0x00, quint8(i), 0x00});
-        writeDaq(quint8(chunks[i].second),
-                 baseAddress + quint32(chunks[i].first));
+        writeDaq(quint8(chunks[i].len), chunks[i].addr);
     }
 
     simple({CMD_SET_DAQ_MODE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00});
@@ -280,14 +300,30 @@ void XcpClient::parseImu(const char *d)
     m_accum.imuTempC = readF(28);
 }
 
-void XcpClient::storeRaw(int offset, const char *d, int len)
+void XcpClient::storeRaw(int blockIdx, int offset, const char *d, int len)
 {
     // Buffer sizes itself to the block the A2L asked for, so it always covers
     // every described measurement.
-    if (m_accum.raw.size() != m_blockSize)
-        m_accum.raw = QByteArray(m_blockSize, char(0));
-    if (offset >= 0 && len > 0 && offset + len <= m_blockSize)
-        std::memcpy(m_accum.raw.data() + offset, d, size_t(len));
+    if (blockIdx < 0 || blockIdx >= m_raws.size())
+        return;
+    const int cap = m_blocks[blockIdx].size;
+    if (m_raws[blockIdx].size() != cap)
+        m_raws[blockIdx] = QByteArray(cap, char(0));
+    if (offset >= 0 && len > 0 && offset + len <= cap)
+        std::memcpy(m_raws[blockIdx].data() + offset, d, size_t(len));
+
+    // Mirror block 0 into m_accum.raw: parseNamedFields(), the layout offsets
+    // and the footer all read Xcp_Data through it.
+    if (blockIdx == 0)
+        m_accum.raw = m_raws[0];
+
+    // Publish every block, so a consumer can decode a signal wherever it lives.
+    // Populating this is not optional: leaving it empty is exactly how the
+    // Xcp_Fusion signals stayed blank after the transport already had them.
+    m_accum.blockRaw = m_raws;
+    m_accum.blockBase.resize(m_blocks.size());
+    for (int i = 0; i < m_blocks.size(); ++i)
+        m_accum.blockBase[i] = m_blocks[i].base;
 }
 
 void XcpClient::parseSys(const char *d)
@@ -376,16 +412,15 @@ void XcpClient::handleDaqFrame(const QByteArray &packet)
     // slices of the block, so the PID alone gives the destination offset. No
     // per-peripheral branch, and therefore no frame that can arrive with
     // nowhere to be stored.
-    const QVector<QPair<int, int>> chunks = blockChunks();
+    const QVector<Chunk> chunks = blockChunks();
     if (pid >= chunks.size())
         return;                             // stale DAQ list from a previous run
 
-    const int off = chunks[pid].first;
-    const int len = chunks[pid].second;
+    const int len = chunks[pid].len;
     if (packet.size() < 1 + len)
         return;
 
-    storeRaw(off, d, len);
+    storeRaw(chunks[pid].blockIdx, chunks[pid].off, d, len);
 
     // Emit once per event, after the final ODT of the cycle. The firmware sends
     // them in index order, so by here the block is whole -- which also removes
@@ -465,7 +500,8 @@ void XcpClient::handleResponse(const QByteArray &packet)
         // sequence decodes the named fields and emits the merged block, so the
         // consumer always sees a consistent snapshot.
         if (packet.size() >= 1 + m_current.len)
-            storeRaw(m_current.off, packet.constData() + 1, m_current.len);
+            storeRaw(m_current.blockIdx, m_current.off, packet.constData() + 1,
+                 m_current.len);
 
         if (m_current.last) {
             parseNamedFields();
