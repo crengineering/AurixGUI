@@ -12,29 +12,13 @@
 #include <QLineEdit>
 #include <QGroupBox>
 #include <QSet>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
+#include <cmath>
 
 namespace {
 // Address of the firmware measurement block; A2L ECU_ADDRESSes are absolute.
 constexpr quint32 XCP_DATA_ADDR = 0x70030000u;
-
-// Group heading for a signal, from its name prefix - same convention as the
-// Sensors tab, so the picker reads the same way.
-QString groupTitleFor(const QString &name)
-{
-    if (name.startsWith("Baro")) return QStringLiteral("Barometer");
-    if (name.startsWith("Imu"))  return QStringLiteral("IMU");
-    if (name.startsWith("Mag"))  return QStringLiteral("Magnetometer");
-    if (name.startsWith("Gnss")) return QStringLiteral("GNSS");
-    if (name.startsWith("Att"))  return QStringLiteral("Attitude");
-    if (name.startsWith("Nav"))  return QStringLiteral("Navigation");
-    if (name.startsWith("Ctrl")) return QStringLiteral("Flight control");
-    if (name.startsWith("Core")) return QStringLiteral("Core load");
-    if (name.startsWith("Eth"))  return QStringLiteral("Ethernet");
-    return QStringLiteral("Onboard");
-}
-
-const char *kGroupOrder[] = { "Onboard", "Barometer", "IMU", "Magnetometer",
-                              "GNSS", "Core load", "Ethernet" };
 } // namespace
 
 PlotPane::PlotPane(int index, const QVector<A2lMeas> &available, QWidget *parent)
@@ -47,12 +31,23 @@ PlotPane::PlotPane(int index, const QVector<A2lMeas> &available, QWidget *parent
     edit->setToolTip(tr("Choose which measurements this plot draws"));
     connect(edit, &QPushButton::clicked, this, &PlotPane::editSignals);
 
+    auto *yAxis = new QPushButton(tr("Y axis..."));
+    yAxis->setToolTip(tr("Autoscale, or a fixed Y min/max for this plot"));
+    connect(yAxis, &QPushButton::clicked, this, &PlotPane::editYAxis);
+
+    auto *reset = new QPushButton(tr("Reset view"));
+    reset->setToolTip(tr("Back to autoscale and the live time window "
+                         "(same as double-clicking the plot)"));
+    connect(reset, &QPushButton::clicked, this, [this]() { m_plot->resetView(); });
+
     auto *close = new QPushButton(tr("Remove"));
     connect(close, &QPushButton::clicked, this, [this]() { emit removeRequested(this); });
 
     auto *head = new QHBoxLayout;
     head->addWidget(m_title, 1);
     head->addWidget(edit);
+    head->addWidget(yAxis);
+    head->addWidget(reset);
     head->addWidget(close);
 
     auto *col = new QVBoxLayout(this);
@@ -162,17 +157,19 @@ void PlotPane::editSignals()
     QVector<QCheckBox *> boxes;
     QVector<int>         boxToMeas;
 
-    // Grouped exactly like the Sensors tab so the two read alike.
-    for (const char *g : kGroupOrder) {
+    // Grouped exactly like the Sensors tab (same A2lModel::groups() table) so
+    // the two read alike and a new prefix appears in both at once.
+    const QVector<A2lGroup> &plotGroups = A2lModel::groups();
+    for (int g = 0; g < plotGroups.size(); ++g) {
         QVector<int> members;
         for (int i = 0; i < m_available.size(); ++i)
             if (!m_available[i].isBitMask &&
-                groupTitleFor(m_available[i].name) == QLatin1String(g))
+                A2lModel::groupIndexOf(m_available[i].name) == g)
                 members.append(i);
         if (members.isEmpty())
             continue;
 
-        auto *box    = new QGroupBox(QString::fromLatin1(g));
+        auto *box    = new QGroupBox(plotGroups[g].title);
         auto *boxCol = new QVBoxLayout(box);
         for (int i : members) {
             const A2lMeas &m = m_available[i];
@@ -223,4 +220,57 @@ void PlotPane::editSignals()
         if (boxes[i]->isChecked())
             picked.append(m_available[boxToMeas[i]].name);
     setSelectedNames(picked);
+}
+
+void PlotPane::editYAxis()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Y axis for plot %1").arg(m_index + 1));
+    auto *v = new QVBoxLayout(&dlg);
+
+    auto *autoBox = new QCheckBox(tr("Autoscale"));
+    autoBox->setChecked(m_plot->yAutoscale());
+    v->addWidget(autoBox);
+
+    auto *form = new QFormLayout;
+    auto *minBox = new QDoubleSpinBox;
+    auto *maxBox = new QDoubleSpinBox;
+    for (QDoubleSpinBox *b : {minBox, maxBox}) {
+        b->setRange(-1.0e9, 1.0e9);
+        b->setDecimals(4);
+        b->setSingleStep(0.1);
+    }
+    // Seed with the current (autoscaled or fixed) range, not 0/1, so opening
+    // the dialog to nudge one bound does not clobber the other.
+    minBox->setValue(m_plot->yRangeMin());
+    maxBox->setValue(m_plot->yRangeMax());
+    form->addRow(tr("Min:"), minBox);
+    form->addRow(tr("Max:"), maxBox);
+    v->addLayout(form);
+
+    auto updateEnabled = [&]() {
+        const bool fixed = !autoBox->isChecked();
+        minBox->setEnabled(fixed);
+        maxBox->setEnabled(fixed);
+    };
+    updateEnabled();
+    connect(autoBox, &QCheckBox::toggled, &dlg, updateEnabled);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    v->addWidget(buttons);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    if (autoBox->isChecked()) {
+        m_plot->setYAutoscale();
+        return;
+    }
+    double lo = minBox->value();
+    double hi = maxBox->value();
+    if (hi <= lo)                       // guard the same swap/typo case as a
+        hi = lo + 1.0;                  // scroll-zoom would otherwise clamp
+    m_plot->setYFixedRange(lo, hi);
 }

@@ -151,6 +151,36 @@ QVector<A2lChar> A2lModel::parseFile(const QString &path, QString *err)
     return out;
 }
 
+const QVector<A2lGroup> &A2lModel::groups()
+{
+    // Order defines the order the boxes appear in. New MEASUREMENT prefixes
+    // (e.g. a future sensor) only need an entry here to show up correctly
+    // grouped everywhere at once.
+    static const QVector<A2lGroup> g = {
+        { QStringLiteral("Onboard (die temperature, supply rails)"), QStringLiteral("")       },
+        { QStringLiteral("Barometer - BMP581"),                      QStringLiteral("Baro")   },
+        { QStringLiteral("IMU - ICM-42688-P"),                       QStringLiteral("Imu")    },
+        { QStringLiteral("Magnetometer - MMC5983MA"),                QStringLiteral("Mag")    },
+        { QStringLiteral("GNSS - NEO-M9N"),                          QStringLiteral("Gnss")   },
+        { QStringLiteral("Attitude - roll / pitch / yaw"),           QStringLiteral("Att")    },
+        { QStringLiteral("Navigation - position, velocity, biases"), QStringLiteral("Nav")    },
+        { QStringLiteral("Flight control feedback (rad, body)"),     QStringLiteral("Ctrl")   },
+        { QStringLiteral("Sensor fusion (scaffold)"),                QStringLiteral("Fusion") },
+        { QStringLiteral("Core load"),                               QStringLiteral("Core")   },
+        { QStringLiteral("Ethernet"),                                QStringLiteral("Eth")    },
+    };
+    return g;
+}
+
+int A2lModel::groupIndexOf(const QString &name)
+{
+    const QVector<A2lGroup> &g = groups();
+    for (int i = 1; i < g.size(); ++i)          // 0 is the catch-all, matched last
+        if (name.startsWith(g[i].prefix))
+            return i;
+    return 0;
+}
+
 QVector<A2lMeas> A2lModel::parseMeasurements(const QString &path, QString *err)
 {
     QVector<A2lMeas> out;

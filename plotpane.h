@@ -54,6 +54,7 @@ signals:
 
 private slots:
     void editSignals();
+    void editYAxis();
 
 private:
     void rebuildSeries();

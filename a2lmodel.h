@@ -49,8 +49,31 @@ struct A2lMeas {
     quint32 bitMask   = 0;      // the mask itself, when isBitMask
 };
 
+// Display grouping for a MEASUREMENT, by name prefix, in display order.
+// prefix "" is the catch-all and is always index 0.
+//
+// This is the single source of truth for "which box does this signal appear
+// in" -- shared by the Sensors tab and the plot signal picker. It used to be
+// two independent hardcoded tables (one per tab) that had to be kept in sync
+// by hand; the plot picker's copy fell behind when Attitude/Navigation/Flight
+// control measurements were added, so those signals existed in the A2L, were
+// parsed, and were simply impossible to select on a plot even though the
+// Sensors tab showed them fine. Add a prefix here once and every consumer
+// picks it up.
+struct A2lGroup {
+    QString title;
+    QString prefix;
+};
+
 class A2lModel {
 public:
+    // Canonical (title, prefix) list, in display order.
+    static const QVector<A2lGroup> &groups();
+
+    // Index into groups() for a MEASUREMENT name (first prefix match,
+    // catch-all excluded from the search); 0 if nothing more specific matches.
+    static int groupIndexOf(const QString &name);
+
     // Parse every CHARACTERISTIC in the file. Returns the list (empty on
     // failure); *err, if given, holds a human-readable reason on failure.
     static QVector<A2lChar> parseFile(const QString &path, QString *err = nullptr);
