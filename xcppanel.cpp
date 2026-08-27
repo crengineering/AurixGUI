@@ -276,35 +276,10 @@ QWidget *XcpPanel::buildLiveTab()
 // already receives, indexed by (ECU_ADDRESS - XCP_DATA_ADDR), so showing more
 // signals costs no extra XCP traffic.
 // ---------------------------------------------------------------------------
-namespace {
-
-// Which group a signal belongs to, from its name prefix. Order defines the
-// order the boxes appear in.
-struct SensorGroup { const char *title; const char *prefix; };
-
-const SensorGroup kSensorGroups[] = {
-    { "Onboard (die temperature, supply rails)", ""      },  // catch-all, matched last
-    { "Barometer - BMP581",                      "Baro"  },
-    { "IMU - ICM-42688-P",                       "Imu"   },
-    { "Magnetometer - MMC5983MA",                "Mag"   },
-    { "GNSS - NEO-M9N",                          "Gnss"  },
-    { "Attitude - roll / pitch / yaw",           "Att"   },
-    { "Navigation - position, velocity, biases", "Nav"   },
-    { "Flight control feedback (rad, body)",     "Ctrl"  },
-    { "Core load",                               "Core"  },
-    { "Ethernet",                                "Eth"   },
-};
-constexpr int kGroupCount = int(sizeof(kSensorGroups) / sizeof(kSensorGroups[0]));
-
-int groupOf(const QString &name)
-{
-    for (int g = 1; g < kGroupCount; ++g)                 // skip the catch-all
-        if (name.startsWith(QLatin1String(kSensorGroups[g].prefix)))
-            return g;
-    return 0;
-}
-
-} // namespace
+// Grouping (title + prefix, display order) lives in A2lModel::groups() so the
+// Sensors tab and the plot signal picker always agree on it -- see the
+// comment on A2lGroup in a2lmodel.h for why this used to be two separate
+// hardcoded tables and what that cost.
 
 QWidget *XcpPanel::buildSensorsTab()
 {
@@ -343,8 +318,9 @@ void XcpPanel::rebuildSensorsTab()
     if (!col)
         return;
 
-    for (int g = 0; g < kGroupCount; ++g) {
-        auto *box  = new QGroupBox(QString::fromLatin1(kSensorGroups[g].title));
+    const QVector<A2lGroup> &sensorGroups = A2lModel::groups();
+    for (int g = 0; g < sensorGroups.size(); ++g) {
+        auto *box  = new QGroupBox(sensorGroups[g].title);
         auto *form = new QFormLayout(box);
         int rows = 0;
 
@@ -352,7 +328,7 @@ void XcpPanel::rebuildSensorsTab()
             const A2lMeas &mm = m_meas[i];
             // The individual diagnostics bits have their own tab; showing ~20
             // of them here would bury the actual sensor readings.
-            if (mm.isBitMask || groupOf(mm.name) != g)
+            if (mm.isBitMask || A2lModel::groupIndexOf(mm.name) != g)
                 continue;
 
             auto *val = new QLabel("-");
