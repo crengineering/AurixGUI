@@ -32,6 +32,19 @@ the firmware is nothing more than a new A2L entry here.
 The MF4 recording is deliberately standard-conforming, so measurement files can
 be evaluated without this tool — with asammdf, for instance.
 
+## Compatibility with the firmware
+
+The GUI is **A2L-driven**: new firmware signals normally appear without any
+GUI change, because tabs and channels are built at runtime from the loaded
+A2L. When a firmware feature nevertheless required GUI code edits, the
+minimum GUI commit is recorded here — running an older GUI against newer
+firmware silently hides those signals. Append a row whenever such a change
+lands.
+
+| Firmware feature | Needs GUI ≥ | Date |
+|---|---|---|
+| Sensor-fusion signals (`Xcp_Fusion` block, fw v1.19.x) | commit `1cf8112` | 2026-08-27 |
+
 ![Sensors tab showing live IMU, barometer, magnetometer and GNSS values read from the ECU](docs/img/sensors-tab.png)
 
 *Sensors tab — the groups are built at runtime from the loaded A2L.*
