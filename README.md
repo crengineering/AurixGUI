@@ -1,5 +1,7 @@
 # AurixGUI — Measurement and Calibration Frontend
 
+**ASPICE:** SWE.2 — software architecture/overview, GUI domain · realizes SYS-COM-001 (groundstation, R-008) · process: QuadSE/requirements/README.md
+
 A C++/Qt6 desktop frontend for an AURIX TC399 ECU: watch measurements live,
 calibrate parameters, read diagnostics, plot signals and record them as MF4 —
 over **XCP on UDP**, described by the ECU's **A2L** file.

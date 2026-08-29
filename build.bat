@@ -22,7 +22,8 @@ if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 echo [1/2] Configuring...
 "%CMAKE%" -S "%~dp0." -B "%BUILD_DIR%" -G Ninja ^
     -DCMAKE_MAKE_PROGRAM="%NINJA%" ^
-    -DCMAKE_PREFIX_PATH=C:\msys64\ucrt64
+    -DCMAKE_PREFIX_PATH=C:\msys64\ucrt64 ^
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 if %ERRORLEVEL% neq 0 ( echo Configure failed. & exit /b %ERRORLEVEL% )
 
 echo [2/2] Building...
