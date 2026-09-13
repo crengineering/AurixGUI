@@ -21,6 +21,7 @@ class QTimer;
 class PlotWidget;
 class PlotPane;
 class QGridLayout;
+class AttitudeView;
 
 // "Ethernet" tab: connects to the XCP slave on the TC399. Contains
 // three sub-tabs: live measurements, diagnostics interpretation (bitmask
@@ -67,6 +68,7 @@ private:
     QWidget *buildCalTab();
     QWidget *buildNvmTab();
     QWidget *buildPlotTab();
+    QWidget *buildAttitudeTab();
     void     setConnectedState(bool connected);
     int      measurementBlockSize() const;  // Xcp_Data bytes the A2L describes
     // Every measurement block the A2L describes, not just Xcp_Data.
@@ -167,10 +169,16 @@ private:
     QPushButton    *m_calImportBtn = nullptr;
     QList<QPushButton *> m_calRowBtns;
 
-    // DFLASH tab (persistent Xcp_Nvm block)
+    // DFLASH tab (persistent Xcp_Nvm block). Rows are built from the A2L
+    // CHARACTERISTIC list, same as the Calibration tab, filtered to the
+    // Xcp_Nvm address range in loadA2l(); row index == index into m_nvmChars.
     void            writeNvmRow(int row);
     void            sendNvmCommand(quint32 cmd, const QString &name);
     void            setNvmBusy(bool busy);
+    void            rebuildNvmTable();
+    bool            populateNvmFromRead(quint32 base, const QByteArray &data);
+    QVector<A2lChar> m_nvmChars;
+    QLabel         *m_nvmA2lStatus = nullptr;  // "N parameters from A2L" / degrade message
     QTableWidget   *m_nvmTable    = nullptr;
     QPushButton    *m_nvmReadBtn  = nullptr;
     QPushButton    *m_nvmSaveBtn  = nullptr;   // SAVE -> persist to DFLASH
@@ -191,6 +199,7 @@ private:
     // Plot & Log: a user-built set of plots, two per row. Each PlotPane owns
     // its own signal selection and series; none exist until "Add plot".
     QVector<PlotPane *>  m_plotPanes;
+    AttitudeView        *m_attitudeView = nullptr;   // "Attitude" sub-tab (SYS1-015)
     QWidget             *m_plotGridHost = nullptr;
     QGridLayout         *m_plotGrid     = nullptr;
     QPushButton         *m_addPlotBtn   = nullptr;

@@ -29,6 +29,13 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
+      - name: Build attitude self-check (SWE1-GUI-001 evidence, headless)
+        run: cmake --build build --config Release --target attitude_selfcheck
+
+      - name: Run attitude self-check
+        shell: cmd
+        run: build\Release\attitude_selfcheck.exe
+
       - name: Deploy Qt DLLs
         run: windeployqt --release build/Release/SerialMonitor.exe
 
