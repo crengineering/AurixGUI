@@ -17,7 +17,7 @@ set(CMAKE_AUTOMOC ON)
 
 # Sucht die Qt6-Komponenten. SerialPort ist das Modul fuer QSerialPort,
 # Concurrent fuer den Port-Scan im Hintergrund-Thread.
-find_package(Qt6 REQUIRED COMPONENTS Widgets SerialPort Network Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Widgets SerialPort Network Concurrent OpenGLWidgets)
 
 add_executable(SerialMonitor
     main.cpp
@@ -40,6 +40,10 @@ add_executable(SerialMonitor
     plotpane.h
     systemfooter.cpp
     systemfooter.h
+    attitudeview.cpp
+    attitudeview.h
+    attitudeglwidget.cpp
+    attitudeglwidget.h
     $<$<BOOL:${WIN32}>:app.rc>
 )
 
@@ -72,9 +76,25 @@ target_link_libraries(SerialMonitor PRIVATE
     Qt6::SerialPort
     Qt6::Network
     Qt6::Concurrent
+    Qt6::OpenGLWidgets
 )
 
 # dwmapi liefert DwmSetWindowAttribute fuer die eingefaerbte Titelleiste.
 if(WIN32)
     target_link_libraries(SerialMonitor PRIVATE dwmapi)
 endif()
+
+# Headless, automated evidence for SWE1-GUI-001 (vv: unit): runs the
+# handedness self-check without a display, a GL context or a QApplication --
+# see tools/attitude_selfcheck_main.cpp. EXCLUDE_FROM_ALL like mkicon above: a
+# plain `cmake --build build` builds only the app; build.bat and CI build and
+# run this target explicitly as a separate, deliberate step.
+enable_testing()
+add_executable(attitude_selfcheck EXCLUDE_FROM_ALL
+    tools/attitude_selfcheck_main.cpp
+    attitudeglwidget.cpp
+    attitudeglwidget.h
+)
+target_include_directories(attitude_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(attitude_selfcheck PRIVATE Qt6::Widgets Qt6::OpenGLWidgets)
+add_test(NAME attitude_selfcheck COMMAND attitude_selfcheck)

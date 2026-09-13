@@ -1,6 +1,7 @@
 #include "xcppanel.h"
 #include "plotwidget.h"
 #include "plotpane.h"
+#include "attitudeview.h"
 #include <QGridLayout>
 #include "lampicon.h"
 
@@ -48,22 +49,20 @@ constexpr int     POLL_MS       = 100;  // 10 Hz
 // DFLASH. The master writes SAVE/DFLT into the command word, the firmware
 // executes it in its 100 ms task and clears the word back to 0 (handshake).
 constexpr quint32 XCP_NVM_ADDR    = 0x70030200;
+constexpr quint32 XCP_NVM_SIZE    = 0x100;        // block spacing, see A2lModel
 constexpr quint32 NVM_CMD_ADDR    = XCP_NVM_ADDR + 0x04;
-constexpr quint32 NVM_PARAM_ADDR  = XCP_NVM_ADDR + 0x08;
 constexpr quint32 NVM_CMD_SAVE    = 0x45564153;   // "SAVE"
 constexpr quint32 NVM_CMD_DFLT    = 0x544C4644;   // "DFLT"
 constexpr int     NVM_POLL_MS     = 150;
 constexpr int     NVM_MAX_RETRIES = 10;
 
-// Persistent parameters (uint32 each, offsets after the command word).
-// Only parameters that are deliberately persistent appear here; everything
-// else belongs in the RAM cal block (A2L-driven "Calibration" tab).
-struct NvmParam { const char *key; const char *name; };
-constexpr NvmParam NVM_PARAMS[] = {
-    {"userValue", "userValue - free uint32 (validation)"},
-    {"seaLevelPa", "seaLevelPa - sea-level ref [Pa] for baro altitude (QNH)"},
-};
-constexpr int NVM_VALUES = int(sizeof(NVM_PARAMS) / sizeof(NVM_PARAMS[0]));
+// Persistent parameters are every A2L CHARACTERISTIC whose address falls
+// inside the Xcp_Nvm block, except the command word itself (that one is
+// driven by the SAVE/DFLT buttons, not a row). This used to be a hardcoded
+// {key, name} pair per parameter -- which is exactly the "never hard-code a
+// signal list" rule the rest of the GUI follows, just missed here. Adding
+// NvmMagOffX/Y/Z etc. to the firmware's A2L is now enough to make them
+// editable in the DFLASH tab; see rebuildNvmTable().
 
 // Fallback diagStatus bits, used only when no A2L is loaded. The live table is
 // built from the A2L BIT_MASK measurements (see rebuildDiagTable), so firmware
@@ -109,6 +108,20 @@ QString formatCharValue(const A2lChar &c, const uchar *p)
         return QString::number(uint(p[0]));
     }
     return QStringLiteral("-");
+}
+
+// DFLASH tab formatting: fixed decimals / stable width so the digits do not
+// jitter as values are re-read (formatCharValue's 'g' 6 is fine for the
+// Calibration tab's mixed-magnitude values, but shrinks/grows the field
+// width from read to read).
+QString formatNvmValue(const A2lChar &c, const uchar *p)
+{
+    if (c.type == A2lType::Float32) {
+        float f;
+        std::memcpy(&f, p, sizeof(f));
+        return QString::number(double(f), 'f', 6);
+    }
+    return formatCharValue(c, p);
 }
 
 QByteArray encodeCharValue(const A2lChar &c, const QString &text, bool *ok)
@@ -178,6 +191,7 @@ XcpPanel::XcpPanel(QWidget *parent)
     m_subTabs->addTab(buildCalTab(),  "Calibration");
     m_subTabs->addTab(buildNvmTab(),  "DFLASH");
     m_subTabs->addTab(buildPlotTab(), "Plot && Log");
+    m_subTabs->addTab(buildAttitudeTab(), "Attitude");
     updateDiagLamp();
 
     auto *layout = new QVBoxLayout(this);
@@ -595,11 +609,18 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
         return;                     // keep any previously loaded characteristics
     }
 
-    // The persistent NVM block keeps its own DFLASH tab, so drop it here.
+    // The persistent NVM block keeps its own DFLASH tab: every CHARACTERISTIC
+    // inside Xcp_Nvm goes to m_nvmChars instead of m_chars, except the command
+    // word itself (NVM_CMD_ADDR), which is driven by the SAVE/DFLT buttons and
+    // is not a value row.
     m_chars.clear();
+    m_nvmChars.clear();
     for (const A2lChar &c : parsed) {
-        if (c.addr >= XCP_NVM_ADDR && c.addr < XCP_NVM_ADDR + 0x100u)
+        if (c.addr >= XCP_NVM_ADDR && c.addr < XCP_NVM_ADDR + XCP_NVM_SIZE) {
+            if (c.addr != NVM_CMD_ADDR)
+                m_nvmChars.append(c);
             continue;
+        }
         m_chars.append(c);
     }
     m_a2lPath = path;
@@ -645,10 +666,13 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
             m_signalIdx.append(i);
 
     rebuildCalTable();
+    rebuildNvmTable();
     rebuildSensorsTab();
     rebuildDiagTable();
     for (PlotPane *pane : m_plotPanes)
         pane->setAvailable(m_meas);
+    if (m_attitudeView)
+        m_attitudeView->setAvailable(m_meas);
 }
 
 void XcpPanel::loadA2lFile()
@@ -660,24 +684,20 @@ void XcpPanel::loadA2lFile()
     loadA2l(path, /*remember=*/true);
 }
 
+// Same 5-column shape as the Calibration tab (Parameter/Description/Unit/
+// Value/Write) -- see rebuildCalTable(). Rows come from m_nvmChars, filled by
+// loadA2l() from every A2L CHARACTERISTIC inside the Xcp_Nvm block.
 QWidget *XcpPanel::buildNvmTab()
 {
-    m_nvmTable = new QTableWidget(NVM_VALUES, 3);
-    m_nvmTable->setHorizontalHeaderLabels({"Parameter", "Value", ""});
+    m_nvmTable = new QTableWidget(0, 5);
+    m_nvmTable->setHorizontalHeaderLabels({"Parameter", "Description", "Unit",
+                                           "Value", ""});
     m_nvmTable->verticalHeader()->setVisible(false);
-    for (int i = 0; i < NVM_VALUES; ++i) {
-        auto *name = new QTableWidgetItem(QString::fromUtf8(NVM_PARAMS[i].name));
-        name->setFlags(name->flags() & ~Qt::ItemIsEditable);
-        m_nvmTable->setItem(i, 0, name);
-        m_nvmTable->setItem(i, 1, new QTableWidgetItem("-"));   // editable
+    m_nvmTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_nvmTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    m_nvmTable->setWordWrap(true);
 
-        auto *writeBtn = new QPushButton("Write");
-        writeBtn->setEnabled(false);
-        connect(writeBtn, &QPushButton::clicked, this, [this, i]() { writeNvmRow(i); });
-        m_nvmTable->setCellWidget(i, 2, writeBtn);
-        m_nvmRowBtns.append(writeBtn);
-    }
-    m_nvmTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_nvmA2lStatus = new QLabel("-");
 
     m_nvmReadBtn = new QPushButton("Read all");
     m_nvmSaveBtn = new QPushButton("Save to DFLASH");
@@ -705,14 +725,69 @@ QWidget *XcpPanel::buildNvmTab()
 
     auto *tab    = new QWidget;
     auto *layout = new QVBoxLayout(tab);
-    layout->addWidget(new QLabel("Persistent parameters (Xcp_Nvm @ 0x70030200) - only this block "
-                                 "is stored in the DFLASH. Only parameters that were deliberately "
-                                 "created as persistent appear here."));
+    layout->addWidget(new QLabel("Persistent parameters: every A2L CHARACTERISTIC inside the "
+                                 "Xcp_Nvm block (0x70030200, 256 B) - only this block is stored "
+                                 "in the DFLASH. Add one to the firmware's A2L and it appears "
+                                 "here, editable, with no GUI change."));
+    layout->addWidget(m_nvmA2lStatus);
     layout->addWidget(m_nvmTable, 1);
     layout->addLayout(btnRow);
     layout->addLayout(statusRow);
     layout->addWidget(new QLabel("Storage health: see diagnostic bit 12 (NVM fault)."));
+
+    rebuildNvmTable();      // fills the table from m_nvmChars loaded in the ctor
     return tab;
+}
+
+// (Re)build the DFLASH rows from the parsed A2L characteristics inside the
+// Xcp_Nvm block. Row i maps to m_nvmChars[i], mirroring rebuildCalTable().
+void XcpPanel::rebuildNvmTable()
+{
+    if (!m_nvmTable)
+        return;
+
+    QFont mono("Consolas");
+    mono.setStyleHint(QFont::Monospace);
+
+    m_nvmTable->setRowCount(0);     // drops old items and cell widgets
+    m_nvmRowBtns.clear();
+    m_nvmTable->setRowCount(m_nvmChars.size());
+
+    const bool connected = m_client->isConnected();
+    for (int i = 0; i < m_nvmChars.size(); ++i) {
+        const A2lChar &c = m_nvmChars[i];
+
+        auto *name = new QTableWidgetItem(c.name);
+        name->setFlags(name->flags() & ~Qt::ItemIsEditable);
+        if (!c.desc.isEmpty())
+            name->setToolTip(c.desc);
+        auto *desc = new QTableWidgetItem(c.desc);
+        desc->setFlags(desc->flags() & ~Qt::ItemIsEditable);
+        desc->setToolTip(c.desc);
+        auto *unit = new QTableWidgetItem(c.unit);
+        unit->setFlags(unit->flags() & ~Qt::ItemIsEditable);
+        auto *value = new QTableWidgetItem("-");   // editable
+        value->setFont(mono);                      // fixed decimals, stable width
+        m_nvmTable->setItem(i, 0, name);
+        m_nvmTable->setItem(i, 1, desc);
+        m_nvmTable->setItem(i, 2, unit);
+        m_nvmTable->setItem(i, 3, value);
+
+        auto *writeBtn = new QPushButton("Write");
+        writeBtn->setEnabled(connected);
+        connect(writeBtn, &QPushButton::clicked, this, [this, i]() { writeNvmRow(i); });
+        m_nvmTable->setCellWidget(i, 4, writeBtn);
+        m_nvmRowBtns.append(writeBtn);
+    }
+
+    if (m_nvmA2lStatus) {
+        if (m_nvmChars.isEmpty())
+            m_nvmA2lStatus->setText("No Xcp_Nvm characteristics in the loaded A2L - "
+                                    "nothing persistent to show");
+        else
+            m_nvmA2lStatus->setText(QString("%1 persistent parameter(s) from the A2L")
+                                     .arg(m_nvmChars.size()));
+    }
 }
 
 
@@ -984,6 +1059,20 @@ void XcpPanel::relayoutPlots()
         m_plotHint->setVisible(m_plotPanes.isEmpty());
 }
 
+// "Attitude" tab (SYS1-015): a 3D model rotated by AttQuat0..3, fed from the
+// same DAQ delivery path as the plots -- see setAvailable()/feedSample() in
+// loadA2l() and onMeasurements() below, and AttitudeView's own header comment.
+QWidget *XcpPanel::buildAttitudeTab()
+{
+    m_attitudeView = new AttitudeView;
+    m_attitudeView->setAvailable(m_meas);   // m_meas already loaded by loadA2l() above
+
+    auto *tab = new QWidget;
+    auto *layout = new QVBoxLayout(tab);
+    layout->addWidget(m_attitudeView);
+    return tab;
+}
+
 void XcpPanel::toggleConnection()
 {
     if (m_client->isConnected()) {
@@ -1133,6 +1222,8 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
     m_lastDaqMs = m_timeBase.elapsed();
     for (PlotPane *pane : m_plotPanes)
         pane->append(t, m.blockBase, m.blockRaw, m.baroPresent, m.imuPresent);
+    if (m_attitudeView)
+        m_attitudeView->feedSample(m);
 
     if (m_logging) {
         QVector<double> values;
@@ -1399,23 +1490,38 @@ void XcpPanel::setNvmBusy(bool busy)
 
 void XcpPanel::readNvmParams()
 {
-    m_client->readMemory(NVM_PARAM_ADDR, quint8(NVM_VALUES * 4));
+    if (m_nvmChars.isEmpty())
+        return;
+
+    // Same idea as readCalibration(): the span comes from the A2L addresses,
+    // not from a hardcoded parameter count, so a new NvmXxx CHARACTERISTIC
+    // widens the fetch on its own.
+    quint32 lo = 0xFFFFFFFFu;
+    quint32 hi = 0;
+    for (const A2lChar &c : m_nvmChars) {
+        lo = qMin(lo, c.addr);
+        hi = qMax(hi, c.addr + quint32(a2lTypeSize(c.type)));
+    }
+    quint32 span = hi - lo;
+    if (span > 63u)
+        span = 63u;             // SHORT_UPLOAD payload cap
+    m_client->readMemory(lo, quint8(span));
 }
 
 void XcpPanel::writeNvmRow(int row)
 {
-    bool          ok    = false;
-    const QString text  = m_nvmTable->item(row, 1)->text().trimmed();
-    const quint32 value = text.toUInt(&ok, 0);   // base 0: "123" or "0x7B"
+    if (row < 0 || row >= m_nvmChars.size())
+        return;
+
+    const A2lChar &c = m_nvmChars[row];
+    bool ok = false;
+    const QByteArray bytes = encodeCharValue(c, m_nvmTable->item(row, 3)->text(), &ok);
     if (!ok) {
-        m_log->appendPlainText(QString("[Invalid value for %1 - aborted]")
-                               .arg(QString::fromUtf8(NVM_PARAMS[row].key)));
+        m_log->appendPlainText(QString("[Invalid value for %1 - aborted]").arg(c.name));
         return;
     }
 
-    QByteArray word(4, '\0');
-    qToLittleEndian<quint32>(value, word.data());
-    m_client->writeMemory(NVM_PARAM_ADDR + quint32(row) * 4, word);
+    m_client->writeMemory(c.addr, bytes);
 }
 
 void XcpPanel::onMemoryRead(quint32 address, const QByteArray &data)
@@ -1441,12 +1547,8 @@ void XcpPanel::onMemoryRead(quint32 address, const QByteArray &data)
         return;
     }
 
-    if (address == NVM_PARAM_ADDR && data.size() >= NVM_VALUES * 4) {
-        for (int i = 0; i < NVM_VALUES; ++i) {
-            const quint32 v = qFromLittleEndian<quint32>(data.constData() + i * 4);
-            m_nvmTable->item(i, 1)->setText(QString::number(v));
-        }
-        m_log->appendPlainText("[NVM parameters read]");
+    if (address >= XCP_NVM_ADDR && address < XCP_NVM_ADDR + XCP_NVM_SIZE) {
+        populateNvmFromRead(address, data);
         return;
     }
 
@@ -1474,6 +1576,27 @@ bool XcpPanel::populateCharsFromRead(quint32 base, const QByteArray &data)
     }
     if (any)
         m_log->appendPlainText("[Calibration/GPIO values read]");
+    return any;
+}
+
+// Same idea as populateCharsFromRead(), for the DFLASH tab's A2L-driven rows.
+bool XcpPanel::populateNvmFromRead(quint32 base, const QByteArray &data)
+{
+    bool any = false;
+    for (int i = 0; i < m_nvmChars.size(); ++i) {
+        const A2lChar &c = m_nvmChars[i];
+        if (c.addr < base)
+            continue;
+        const int off = int(c.addr - base);
+        if (off + a2lTypeSize(c.type) > data.size())
+            continue;
+        const uchar *p = reinterpret_cast<const uchar *>(data.constData()) + off;
+        if (m_nvmTable->item(i, 3))
+            m_nvmTable->item(i, 3)->setText(formatNvmValue(c, p));
+        any = true;
+    }
+    if (any)
+        m_log->appendPlainText("[NVM parameters read]");
     return any;
 }
 
@@ -1567,12 +1690,13 @@ void XcpPanel::onMemoryWritten(quint32 address)
         return;
     }
 
-    if (address >= NVM_PARAM_ADDR && address < NVM_PARAM_ADDR + quint32(NVM_VALUES) * 4) {
-        const int row = int((address - NVM_PARAM_ADDR) / 4);
-        m_log->appendPlainText(QString("[%1 written - remember \"Save to DFLASH\"]")
-                               .arg(QString::fromUtf8(NVM_PARAMS[row].key)));
-        readNvmParams();        // read back for confirmation
-        return;
+    for (const A2lChar &c : m_nvmChars) {
+        if (address == c.addr) {
+            m_log->appendPlainText(QString("[%1 written - remember \"Save to DFLASH\"]")
+                                   .arg(c.name));
+            readNvmParams();     // read back for confirmation
+            return;
+        }
     }
 
     for (const A2lChar &c : m_chars) {
@@ -1650,6 +1774,9 @@ QVector<XcpClient::Block> XcpPanel::measurementBlocks() const
 
 void XcpPanel::setConnectedState(bool connected)
 {
+    if (m_attitudeView)
+        m_attitudeView->setConnected(connected);
+
     m_connectBtn->setText(connected ? "Disconnect" : "Connect");
     m_hostEdit->setEnabled(!connected);
     m_portBox->setEnabled(!connected);

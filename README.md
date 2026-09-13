@@ -1,6 +1,6 @@
 # AurixGUI — Measurement and Calibration Frontend
 
-**ASPICE:** SWE.2 — software architecture/overview, GUI domain · realizes SYS2-COM-001 (groundstation, SYS1-008) · process: QuadSE/requirements/README.md
+**ASPICE:** SWE.2 — software architecture/overview, GUI domain · realizes SYS2-COM-001 (groundstation, SYS1-008) → SWE1-GUI-005 (DFLASH tab A2L-driven) and SYS1-015 → SYS2-GUI-001/SYS2-GUI-002 → SWE1-GUI-001..004 (3D attitude view) · process: QuadSE/requirements/README.md
 
 A C++/Qt6 desktop frontend for an AURIX TC399 ECU: watch measurements live,
 calibrate parameters, read diagnostics, plot signals and record them as MF4 —
@@ -26,8 +26,9 @@ the firmware is nothing more than a new A2L entry here.
 | **Sensors** | Sensor values grouped by device — IMU (ICM-42688-P), barometer (BMP581), magnetometer (MMC5983MA), GNSS (NEO-M9N). The tab is built at runtime from the loaded A2L |
 | **Diagnostics** | Diagnostic bits as a table, decoded from the A2L description |
 | **Calibration** | Read and write calibration values (RAM block) |
-| **DFLASH** | Read, write and verify persistent parameters in the NVM block |
+| **DFLASH** | Read, write and verify persistent parameters — every A2L CHARACTERISTIC inside the Xcp_Nvm block, built at runtime like the Calibration tab |
 | **Plot & Log** | Freely configurable plots, channel selection, recording as **MF4** |
+| **Attitude** | 3D quadrocopter model driven by the firmware's `AttQuat0..3` body-to-NED quaternion (OpenGL); ground grid, N/E/D triad, mouse orbit/zoom, roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`; stale/disconnected pose is shown desaturated, never as live |
 
 The MF4 recording is deliberately standard-conforming, so measurement files can
 be evaluated without this tool — with asammdf, for instance.
@@ -44,6 +45,8 @@ lands.
 | Firmware feature | Needs GUI ≥ | Date |
 |---|---|---|
 | Sensor-fusion signals (`Xcp_Fusion` block, fw v1.19.x) | commit `1cf8112` | 2026-08-27 |
+| 3D attitude view (`AttQuat0..3`/`AttRoll/Pitch/Yaw`/`AttState`, already in `Xcp_Fusion`) | this commit (Attitude tab, `attitudeview.*`/`attitudeglwidget.*`) | 2026-09-11 |
+| Magnetometer calibration CHARACTERISTICs (`NvmMagOffX/Y/Z`, `NvmMagScaleX/Y/Z`, `NvmMagDeclination`, already in `Xcp_Nvm`) | this commit (DFLASH tab rebuilt from the A2L, `xcppanel.cpp`) | 2026-09-13 |
 
 ![Sensors tab showing live IMU, barometer, magnetometer and GNSS values read from the ECU](docs/img/sensors-tab.png)
 
@@ -103,6 +106,8 @@ plotwidget.*        plot rendering (own implementation, no third-party widget)
 plotpane.*          plot management and channel selection
 mf4writer.*         MF4 writer for measurement files
 systemfooter.*      status bar
+attitudeview.*      "Attitude" tab: A2L binding, DAQ feed, readout, stale state
+attitudeglwidget.*  the 3D OpenGL view: model, room, camera, SLERP, NED mapping
 appicon.h           application icon
 lampicon.h          per-tab status lamps
 ```
@@ -129,7 +134,7 @@ work; no third-party code is vendored. The third-party notice that ships with a
 built binary is [NOTICE.txt](NOTICE.txt).
 
 The application links against **Qt 6** (Widgets, SerialPort, Network,
-Concurrent), which is not part of this repository and is used under the
+Concurrent, OpenGLWidgets), which is not part of this repository and is used under the
 **LGPL-3.0**. Distributing this repository as source triggers no LGPL
 obligation. Anyone distributing a **compiled binary** has to satisfy LGPL-3.0
 themselves: link Qt dynamically (the default), ship the Qt DLLs unmodified
