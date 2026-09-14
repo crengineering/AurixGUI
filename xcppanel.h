@@ -22,6 +22,7 @@ class PlotWidget;
 class PlotPane;
 class QGridLayout;
 class AttitudeView;
+class PositionView;
 
 // "Ethernet" tab: connects to the XCP slave on the TC399. Contains
 // three sub-tabs: live measurements, diagnostics interpretation (bitmask
@@ -200,6 +201,7 @@ private:
     // its own signal selection and series; none exist until "Add plot".
     QVector<PlotPane *>  m_plotPanes;
     AttitudeView        *m_attitudeView = nullptr;   // "Attitude" sub-tab (SYS1-015)
+    PositionView        *m_positionView = nullptr;   // right half of "Attitude" tab (SYS1-016)
     QWidget             *m_plotGridHost = nullptr;
     QGridLayout         *m_plotGrid     = nullptr;
     QPushButton         *m_addPlotBtn   = nullptr;

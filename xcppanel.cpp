@@ -2,7 +2,9 @@
 #include "plotwidget.h"
 #include "plotpane.h"
 #include "attitudeview.h"
+#include "positionview.h"
 #include <QGridLayout>
+#include <QSplitter>
 #include "lampicon.h"
 
 #include <QCheckBox>
@@ -673,6 +675,8 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
         pane->setAvailable(m_meas);
     if (m_attitudeView)
         m_attitudeView->setAvailable(m_meas);
+    if (m_positionView)
+        m_positionView->setAvailable(m_meas);
 }
 
 void XcpPanel::loadA2lFile()
@@ -1059,17 +1063,29 @@ void XcpPanel::relayoutPlots()
         m_plotHint->setVisible(m_plotPanes.isEmpty());
 }
 
-// "Attitude" tab (SYS1-015): a 3D model rotated by AttQuat0..3, fed from the
-// same DAQ delivery path as the plots -- see setAvailable()/feedSample() in
-// loadA2l() and onMeasurements() below, and AttitudeView's own header comment.
+// "Attitude" tab (SYS1-015 + SYS1-016): a 3D model rotated by AttQuat0..3 on
+// the left, a top-down position panel on the right (QSplitter) -- both fed
+// from the same DAQ delivery path as the plots, see setAvailable()/
+// feedSample() in loadA2l() and onMeasurements() below, and AttitudeView's/
+// PositionView's own header comments. The attitude view itself is unchanged
+// by the position panel's addition (SYS2-GUI-003).
 QWidget *XcpPanel::buildAttitudeTab()
 {
     m_attitudeView = new AttitudeView;
     m_attitudeView->setAvailable(m_meas);   // m_meas already loaded by loadA2l() above
 
+    m_positionView = new PositionView;
+    m_positionView->setAvailable(m_meas);
+
+    auto *splitter = new QSplitter(Qt::Horizontal);
+    splitter->addWidget(m_attitudeView);
+    splitter->addWidget(m_positionView);
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 1);
+
     auto *tab = new QWidget;
     auto *layout = new QVBoxLayout(tab);
-    layout->addWidget(m_attitudeView);
+    layout->addWidget(splitter);
     return tab;
 }
 
@@ -1224,6 +1240,8 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
         pane->append(t, m.blockBase, m.blockRaw, m.baroPresent, m.imuPresent);
     if (m_attitudeView)
         m_attitudeView->feedSample(m);
+    if (m_positionView)
+        m_positionView->feedSample(m);
 
     if (m_logging) {
         QVector<double> values;
@@ -1776,6 +1794,8 @@ void XcpPanel::setConnectedState(bool connected)
 {
     if (m_attitudeView)
         m_attitudeView->setConnected(connected);
+    if (m_positionView)
+        m_positionView->setConnected(connected);
 
     m_connectBtn->setText(connected ? "Disconnect" : "Connect");
     m_hostEdit->setEnabled(!connected);

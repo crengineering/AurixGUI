@@ -44,6 +44,10 @@ add_executable(SerialMonitor
     attitudeview.h
     attitudeglwidget.cpp
     attitudeglwidget.h
+    positionmath.cpp
+    positionmath.h
+    positionview.cpp
+    positionview.h
     $<$<BOOL:${WIN32}>:app.rc>
 )
 
@@ -98,3 +102,18 @@ add_executable(attitude_selfcheck EXCLUDE_FROM_ALL
 target_include_directories(attitude_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(attitude_selfcheck PRIVATE Qt6::Widgets Qt6::OpenGLWidgets)
 add_test(NAME attitude_selfcheck COMMAND attitude_selfcheck)
+
+# Headless, automated evidence for SWE1-GUI-006/-007 (vv: unit): runs the
+# position panel's pure logic (window scaling, the NED sign flip, the
+# anchoring truth table) without a display or a QApplication -- see
+# tools/position_selfcheck_main.cpp. Deliberately links only positionmath.cpp,
+# not positionview.cpp, so this stays independent of the A2L/XCP/QWidget
+# machinery, same isolation attitude_selfcheck gives the handedness math.
+add_executable(position_selfcheck EXCLUDE_FROM_ALL
+    tools/position_selfcheck_main.cpp
+    positionmath.cpp
+    positionmath.h
+)
+target_include_directories(position_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(position_selfcheck PRIVATE Qt6::Core)
+add_test(NAME position_selfcheck COMMAND position_selfcheck)
