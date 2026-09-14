@@ -28,7 +28,7 @@ the firmware is nothing more than a new A2L entry here.
 | **Calibration** | Read and write calibration values (RAM block) |
 | **DFLASH** | Read, write and verify persistent parameters — every A2L CHARACTERISTIC inside the Xcp_Nvm block, built at runtime like the Calibration tab |
 | **Plot & Log** | Freely configurable plots, channel selection, recording as **MF4** |
-| **Attitude** | 3D quadrocopter model driven by the firmware's `AttQuat0..3` body-to-NED quaternion (OpenGL); ground grid, N/E/D triad, mouse orbit/zoom, roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`; stale/disconnected pose is shown desaturated, never as live — beside it, a **Position** panel: top-down N/E trail (2/5/20 m window, age-faded, origin marker), altitude bar for `Up = -NavPosDown`, and a three-state anchoring readout (GNSS anchored / dead reckoning / baro anchored) |
+| **Attitude** | 3D quadrocopter model driven by the firmware's `AttQuat0..3` body-to-NED quaternion (OpenGL); ground grid, N/E/D triad, mouse orbit/zoom, roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`; stale/disconnected pose is shown desaturated, never as live — beside it, a **Position** panel: top-down N/E trail (2/5/20 m window, age-faded, origin marker) with a velocity arrow and ground-speed label at the current position, altitude bar for `Up = -NavPosDown` with a vertical-rate readout, and a three-state anchoring readout (GNSS anchored / dead reckoning / baro anchored) |
 
 The MF4 recording is deliberately standard-conforming, so measurement files can
 be evaluated without this tool — with asammdf, for instance.
