@@ -6,7 +6,7 @@
 #include <QPointF>
 
 // Pure logic behind the "Position" panel (SYS1-016 -> SYS2-GUI-003 ->
-// SWE1-GUI-006/-007): window scaling, the NED sign flip, the anchoring truth
+// SWE1-GUI-006/-007/-008): window scaling, the NED sign flip, the anchoring truth
 // table, trail age-fade and the live/stale gate. No QWidget, no A2L, no XCP
 // dependency here on purpose -- so this file (and only this file) is what
 // position_selfcheck links, the same isolation attitudeglwidget.h/.cpp gives

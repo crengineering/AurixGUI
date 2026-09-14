@@ -103,7 +103,7 @@ target_include_directories(attitude_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(attitude_selfcheck PRIVATE Qt6::Widgets Qt6::OpenGLWidgets)
 add_test(NAME attitude_selfcheck COMMAND attitude_selfcheck)
 
-# Supporting unit-level evidence for SWE1-GUI-006/-007 (vv: PIL -- the bench
+# Supporting unit-level evidence for SWE1-GUI-006/-007/-008 (vv: PIL -- the bench
 # acceptance is the qualifying level for the item; this self-check covers
 # only the pure logic underneath it): runs the position panel's window
 # scaling, the NED sign flip, the trail age-fade, the live/stale gate and the

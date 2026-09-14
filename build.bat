@@ -36,7 +36,7 @@ if %ERRORLEVEL% neq 0 ( echo Attitude self-check build failed. & exit /b %ERRORL
 "%BUILD_DIR%\attitude_selfcheck.exe"
 if %ERRORLEVEL% neq 0 ( echo Attitude self-check FAILED - handedness math regression. & exit /b %ERRORLEVEL% )
 
-echo [4/4] Position panel self-check (SWE1-GUI-006/-007 evidence, headless)...
+echo [4/4] Position panel self-check (SWE1-GUI-006/-007/-008 evidence, headless)...
 "%CMAKE%" --build "%BUILD_DIR%" --target position_selfcheck
 if %ERRORLEVEL% neq 0 ( echo Position self-check build failed. & exit /b %ERRORLEVEL% )
 "%BUILD_DIR%\position_selfcheck.exe"

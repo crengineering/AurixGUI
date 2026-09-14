@@ -8,6 +8,7 @@
 #include <QFormLayout>
 #include <QPainter>
 #include <QFont>
+#include <QFontMetricsF>
 #include <cmath>
 
 namespace {
@@ -187,6 +188,12 @@ protected:
             const QColor col = m_anchored ? QColor(0x2e, 0x86, 0xde) : palette().color(QPalette::Mid);
             if (m_arrowDir.x() != 0.0 || m_arrowDir.y() != 0.0) {
                 constexpr double kArrowSeconds = 1.0;   // design default: 1 s of travel
+                // Below a certain speed the 12 px floor dominates and the arrow
+                // no longer grows proportionally with speed -- e.g. at the 20 m
+                // window (half = 10 m) with a ~500 px-wide trail widget,
+                // pxPerM ~= 50, so speeds below 12/50 = 0.24 m/s all draw the
+                // same 12 px arrow (SWE1-GUI-008 states this plainly; it is a
+                // stated design default, not a defect).
                 const double pxPerM = halfPx / (posWindowMetres(m_window) / 2.0);
                 const double lenPx = qBound(12.0, m_groundSpeedMs * kArrowSeconds * pxPerM, halfPx * 0.6);
                 const QPointF tip = markerPx + QPointF(m_arrowDir.x() * lenPx, m_arrowDir.y() * lenPx);
@@ -197,8 +204,21 @@ protected:
                 p.drawLine(tip, back + perp * 4.0);
                 p.drawLine(tip, back - perp * 4.0);
             }
+            // Keep the label inside the widget: flip to the other side of
+            // the marker whenever the default (right/up) offset would run
+            // off that edge (review round 2, note 2 -- a marker pinned to
+            // the top-right border used to draw the label partly outside
+            // the widget).
+            const QString speedText = QString("%1 m/s").arg(m_groundSpeedMs, 0, 'f', 2);
+            const QSizeF textSize = QFontMetricsF(p.font()).size(Qt::TextSingleLine, speedText);
+            double tx = markerPx.x() + 8.0;
+            double ty = markerPx.y() - 8.0;
+            if (tx + textSize.width() > rect().right())
+                tx = markerPx.x() - 8.0 - textSize.width();
+            if (ty - textSize.height() < rect().top())
+                ty = markerPx.y() + 8.0 + textSize.height();
             p.setPen(col);
-            p.drawText(markerPx + QPointF(8, -8), QString("%1 m/s").arg(m_groundSpeedMs, 0, 'f', 2));
+            p.drawText(QPointF(tx, ty), speedText);
         }
 
         if (!m_live) {
@@ -310,15 +330,27 @@ protected:
                    QString("-%1 m").arg(half, 0, 'f', 0));
 
         // Vertical rate "next to the altitude value" (SYS2-GUI-003 pt.3):
-        // placed just below the marker line, or above it if that would run
-        // off the bottom -- same anchoring colour as the bar fill, freezes
-        // with it under the STALE overlay below.
+        // placed clear of both the 2px marker line AND the off-scale label
+        // (review round 2, note 3 -- the two used to be able to overlap near
+        // a window edge). Prefers just below the marker, falls back above it
+        // if that would run into the bottom edge/off-scale zone, and is
+        // finally clamped so it can never land ON the off-scale label's own
+        // rect on whichever side the marker is clipped against.
         if (m_haveRate) {
-            const double textY = (yClamped + 26.0 <= area.bottom()) ? yClamped + 2.0 : yClamped - 24.0;
+            constexpr double kGap   = 14.0;   // clear of the 2px marker line + antialiasing
+            constexpr double kTextH = 12.0;
+            const double topLimit    = clippedTop    ? area.top() + kTextH + 2.0 : area.top();
+            const double bottomLimit = clippedBottom ? area.bottom() - kTextH - 2.0 : area.bottom();
+
+            double textY = yClamped + kGap;              // prefer below the marker
+            if (textY + kTextH > bottomLimit)
+                textY = yClamped - kGap - kTextH;         // fall back to above it
+            textY = qBound(topLimit, textY, bottomLimit - kTextH);
+
             const QString rateText = QString("%1%2 m/s")
                 .arg(m_upRateMs >= 0.0 ? "+" : "").arg(m_upRateMs, 0, 'f', 2);
             p.setPen(m_anchored ? QColor(0x27, 0xae, 0x60) : palette().color(QPalette::Mid));
-            p.drawText(QRectF(area.left(), textY, area.width(), 12), Qt::AlignHCenter, rateText);
+            p.drawText(QRectF(area.left(), textY, area.width(), kTextH), Qt::AlignHCenter, rateText);
         }
 
         if (!m_live) {
@@ -495,6 +527,22 @@ void PositionView::resetTrail()
 {
     m_trailPts.clear();
     m_clock.invalidate();
+    // The widgets keep their own copy of the trail/current-position (fed by
+    // setTrail()) so they can still paint a frozen graphic under the STALE
+    // overlay while disconnected (MAJOR 3, round 1). But that means a reset
+    // while disconnected -- e.g. loading a different A2L, which is exactly
+    // when the old trail is "a different board's data" -- must actively
+    // clear them too, or the previous board's path keeps painting under the
+    // overlay (review round 2, minor 1). setHaveSample(false) here is
+    // correct precisely because this is a genuine reset, unlike the
+    // disconnect/not-live freeze in showFrozenReadout(), which must NOT
+    // clear it.
+    if (m_trail) {
+        m_trail->setTrail({}, 0.0, 0.0);
+        m_trail->setHaveSample(false);
+    }
+    if (m_altBar)
+        m_altBar->setHaveSample(false);
 }
 
 void PositionView::pruneTrail(qint64 nowMs)
