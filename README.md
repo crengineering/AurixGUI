@@ -1,6 +1,6 @@
 # AurixGUI — Measurement and Calibration Frontend
 
-**ASPICE:** SWE.2 — software architecture/overview, GUI domain · realizes SYS2-COM-001 (groundstation, SYS1-008) → SWE1-GUI-005 (DFLASH tab A2L-driven) and SYS1-015 → SYS2-GUI-001/SYS2-GUI-002 → SWE1-GUI-001..004 (3D attitude view) · process: QuadSE/requirements/README.md
+**ASPICE:** SWE.2 — software architecture/overview, GUI domain · realizes SYS2-COM-001 (groundstation, SYS1-008) → SWE1-GUI-005 (DFLASH tab A2L-driven), SYS1-015 → SYS2-GUI-001/SYS2-GUI-002 → SWE1-GUI-001..004 (3D attitude view) and SYS1-016 → SYS2-GUI-003 → SWE1-GUI-006/SWE1-GUI-007 (position panel beside it) · process: QuadSE/requirements/README.md
 
 A C++/Qt6 desktop frontend for an AURIX TC399 ECU: watch measurements live,
 calibrate parameters, read diagnostics, plot signals and record them as MF4 —
@@ -28,7 +28,7 @@ the firmware is nothing more than a new A2L entry here.
 | **Calibration** | Read and write calibration values (RAM block) |
 | **DFLASH** | Read, write and verify persistent parameters — every A2L CHARACTERISTIC inside the Xcp_Nvm block, built at runtime like the Calibration tab |
 | **Plot & Log** | Freely configurable plots, channel selection, recording as **MF4** |
-| **Attitude** | 3D quadrocopter model driven by the firmware's `AttQuat0..3` body-to-NED quaternion (OpenGL); ground grid, N/E/D triad, mouse orbit/zoom, roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`; stale/disconnected pose is shown desaturated, never as live |
+| **Attitude** | 3D quadrocopter model driven by the firmware's `AttQuat0..3` body-to-NED quaternion (OpenGL); ground grid, N/E/D triad, mouse orbit/zoom, roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`; stale/disconnected pose is shown desaturated, never as live — beside it, a **Position** panel: top-down N/E trail (2/5/20 m window, age-faded, origin marker), altitude bar for `Up = -NavPosDown`, and a three-state anchoring readout (GNSS anchored / dead reckoning / baro anchored) |
 
 The MF4 recording is deliberately standard-conforming, so measurement files can
 be evaluated without this tool — with asammdf, for instance.
@@ -47,6 +47,7 @@ lands.
 | Sensor-fusion signals (`Xcp_Fusion` block, fw v1.19.x) | commit `1cf8112` | 2026-08-27 |
 | 3D attitude view (`AttQuat0..3`/`AttRoll/Pitch/Yaw`/`AttState`, already in `Xcp_Fusion`) | this commit (Attitude tab, `attitudeview.*`/`attitudeglwidget.*`) | 2026-09-11 |
 | Magnetometer calibration CHARACTERISTICs (`NvmMagOffX/Y/Z`, `NvmMagScaleX/Y/Z`, `NvmMagDeclination`, already in `Xcp_Nvm`) | this commit (DFLASH tab rebuilt from the A2L, `xcppanel.cpp`) | 2026-09-13 |
+| Position/nav-fusion signals (`NavPosNorth/East/Down`, `NavVelNorth/East/Down`, `NavVerticalOk/HorizontalOk/OriginSet`, already in `Xcp_Fusion`; `GnssNavOk/NumSats/HAccuracy`, already in `Xcp_Data`) | commit `29d3351` (Position panel beside Attitude, `positionview.*`/`positionmath.*`) | 2026-09-14 |
 
 ![Sensors tab showing live IMU, barometer, magnetometer and GNSS values read from the ECU](docs/img/sensors-tab.png)
 
@@ -108,6 +109,10 @@ mf4writer.*         MF4 writer for measurement files
 systemfooter.*      status bar
 attitudeview.*      "Attitude" tab: A2L binding, DAQ feed, readout, stale state
 attitudeglwidget.*  the 3D OpenGL view: model, room, camera, SLERP, NED mapping
+positionview.*      "Position" panel beside Attitude: A2L binding, trail/
+                    altitude widgets, anchoring readout, stale state
+positionmath.*      pure window-scaling/sign-flip/anchoring-state logic
+                    shared by positionview.cpp and position_selfcheck
 appicon.h           application icon
 lampicon.h          per-tab status lamps
 ```
