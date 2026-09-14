@@ -14,10 +14,12 @@ class PositionTrailWidget;
 class AltitudeBarWidget;
 
 // "Position" panel beside the Attitude view (SYS1-016 -> SYS2-GUI-003 ->
-// SWE1-GUI-006/-007): top-down N/E trail, altitude bar, readouts and the
-// anchoring state. Fed by the SAME XCP DAQ sample as AttitudeView -- no
-// second XCP session, no I/O in the paint path -- mirroring its
-// setAvailable()/setConnected()/feedSample() delivery path exactly.
+// SWE1-GUI-006/-007/-008): top-down N/E trail with a velocity arrow and
+// speed label at the current-position marker, an altitude bar with a
+// vertical-rate readout, text readouts and the anchoring state. Fed by the
+// SAME XCP DAQ sample as AttitudeView -- no second XCP session, no I/O in
+// the paint path -- mirroring its setAvailable()/setConnected()/
+// feedSample() delivery path exactly.
 //
 // Channels are resolved by NAME against the loaded A2L (NavPosNorth/East/
 // Down, NavVelNorth/East/Down, NavVerticalOk, NavHorizontalOk, NavOriginSet,
@@ -54,10 +56,17 @@ private:
     void showFrozenReadout();
     void pruneTrail(qint64 nowMs);
     void resetTrail();
+    // Frame description in the panel's intro line: "relative to the
+    // tangent-plane origin" once NavOriginSet, else "relative to power-on /
+    // dead reckoning" -- (0,0) means something different in each case, and
+    // showing an origin marker while the readout says "not set" would
+    // contradict itself (review finding MINOR 6).
+    void updateIntroText(bool haveOrigin);
 
     PositionTrailWidget *m_trail       = nullptr;
     AltitudeBarWidget   *m_altBar      = nullptr;
     QComboBox           *m_windowBox   = nullptr;
+    QLabel              *m_introLbl    = nullptr;   // origin-relative vs power-on wording
     QLabel *m_nLbl = nullptr, *m_eLbl = nullptr, *m_upLbl = nullptr;
     QLabel *m_velLbl        = nullptr;
     QLabel *m_horizLbl      = nullptr;
@@ -70,17 +79,16 @@ private:
     int m_idxPosN = -1, m_idxPosE = -1, m_idxPosD = -1;
     int m_idxVelN = -1, m_idxVelE = -1, m_idxVelD = -1;
     int m_idxVertOk = -1, m_idxHorizOk = -1, m_idxOriginSet = -1;
-    int m_idxGnssNavOk = -1, m_idxGnssNumSats = -1, m_idxGnssHAcc = -1;
+    int m_idxGnssNavOk = -1, m_idxGnssFixType = -1, m_idxGnssNumSats = -1, m_idxGnssHAcc = -1;
     int m_idxAttState = -1;
     bool m_bound     = false;   // NavPosNorth/East/Down all resolved
     bool m_connected = false;
 
     QVector<TrailPoint> m_trailPts;         // oldest .. newest
     QElapsedTimer        m_clock;
-    // Design default (dispatch/SYS1-016 recommendation, stated in the
-    // aurix-gui report and SWE1-GUI-006): the trail keeps the last 60 s, not
-    // a user setting.
-    static constexpr qint64 kTrailLengthMs = 60000;
+    // Trail length is kPosTrailLengthMs (positionmath.h) -- ONE definition,
+    // shared with PositionTrailWidget's age-fade divisor (review finding
+    // MINOR 7 was the two silently disagreeing).
     PosWindow m_window = PosWindow::W5m;    // design default: 5 m
 };
 

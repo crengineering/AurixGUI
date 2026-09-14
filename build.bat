@@ -19,24 +19,24 @@ if not exist "%NINJA%" (
 
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
-echo [1/3] Configuring...
+echo [1/4] Configuring...
 "%CMAKE%" -S "%~dp0." -B "%BUILD_DIR%" -G Ninja ^
     -DCMAKE_MAKE_PROGRAM="%NINJA%" ^
     -DCMAKE_PREFIX_PATH=C:\msys64\ucrt64 ^
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 if %ERRORLEVEL% neq 0 ( echo Configure failed. & exit /b %ERRORLEVEL% )
 
-echo [2/3] Building...
+echo [2/4] Building...
 "%CMAKE%" --build "%BUILD_DIR%"
 if %ERRORLEVEL% neq 0 ( echo Build failed. & exit /b %ERRORLEVEL% )
 
-echo [3/3] Attitude handedness self-check (SWE1-GUI-001 evidence, headless)...
+echo [3/4] Attitude handedness self-check (SWE1-GUI-001 evidence, headless)...
 "%CMAKE%" --build "%BUILD_DIR%" --target attitude_selfcheck
 if %ERRORLEVEL% neq 0 ( echo Attitude self-check build failed. & exit /b %ERRORLEVEL% )
 "%BUILD_DIR%\attitude_selfcheck.exe"
 if %ERRORLEVEL% neq 0 ( echo Attitude self-check FAILED - handedness math regression. & exit /b %ERRORLEVEL% )
 
-echo [3/3] Position panel self-check (SWE1-GUI-006/-007 evidence, headless)...
+echo [4/4] Position panel self-check (SWE1-GUI-006/-007 evidence, headless)...
 "%CMAKE%" --build "%BUILD_DIR%" --target position_selfcheck
 if %ERRORLEVEL% neq 0 ( echo Position self-check build failed. & exit /b %ERRORLEVEL% )
 "%BUILD_DIR%\position_selfcheck.exe"

@@ -59,6 +59,11 @@ public:
     void setHaveSample(bool have) { m_haveSample = have; update(); }
     void setAnchored(bool anchored) { m_anchored = anchored; update(); }
     void setLive(bool live)     { m_live = live; update(); }
+    // Origin marker only when the firmware has actually latched a
+    // tangent-plane origin (NavOriginSet) -- always true indoors otherwise,
+    // which would draw a marker the readout itself labels "not set" (review
+    // finding MINOR 6).
+    void setHaveOrigin(bool have) { m_haveOrigin = have; update(); }
 
     void setTrail(const QVector<Point> &points, double currentNorth, double currentEast)
     {
@@ -68,7 +73,18 @@ public:
         update();
     }
 
-    static constexpr qint64 kTrailLengthMs = 60000;
+    // "Speed at the drone marker" (SYS2-GUI-003 pt.3, acceptance (g)):
+    // ground speed and travel direction at the current-position marker.
+    // haveVelocity false (NavVelNorth/East not decodable this sample) draws
+    // neither label nor arrow, same "don't show stale/bogus data" rule as
+    // everywhere else in this panel.
+    void setVelocity(bool haveVelocity, double groundSpeedMs, QPointF arrowDir)
+    {
+        m_haveVelocity  = haveVelocity;
+        m_groundSpeedMs = groundSpeedMs;
+        m_arrowDir      = arrowDir;
+        update();
+    }
 
 protected:
     void paintEvent(QPaintEvent *) override
@@ -92,20 +108,34 @@ protected:
         const QRectF area = rect().adjusted(10, 10, -10, -10);
         const double halfPx = qMin(area.width(), area.height()) / 2.0;
         const QPointF centerPx = area.center();
+        const QRectF windowRect(centerPx.x() - halfPx, centerPx.y() - halfPx, 2 * halfPx, 2 * halfPx);
 
-        auto toPx = [&](double north, double east) {
+        // Pinned-to-frame points (origin marker, current-position marker,
+        // which is offset (0,0) by definition): clamped mapping is correct
+        // here, they are meant to sit on the border when out of view.
+        auto toPxClamped = [&](double north, double east) {
             const QPointF n = posNormalize(north - m_currentNorth, east - m_currentEast, m_window);
+            return centerPx + QPointF(n.x() * halfPx, n.y() * halfPx);
+        };
+        // Trail polyline points: UNCLAMPED -- may land far outside the
+        // widget. Drawn under a clip rect below instead of being snapped to
+        // the border, so an out-of-window trail is clipped away, not
+        // repainted as a path along the frame that was never flown (review
+        // finding MAJOR 4).
+        auto toPxUnclamped = [&](double north, double east) {
+            const QPointF n = posNormalizeUnclamped(north - m_currentNorth, east - m_currentEast, m_window);
             return centerPx + QPointF(n.x() * halfPx, n.y() * halfPx);
         };
 
         // window border
         p.setPen(QPen(palette().color(QPalette::Mid), 1, Qt::DashLine));
-        p.drawRect(QRectF(centerPx.x() - halfPx, centerPx.y() - halfPx, 2 * halfPx, 2 * halfPx));
+        p.drawRect(windowRect);
 
-        // origin marker (tangent-plane origin sits at N=0, E=0 by convention),
-        // shown whenever it lies inside the current window (SYS2-GUI-003 pt.1).
-        {
-            const QPointF o = toPx(0.0, 0.0);
+        // origin marker (tangent-plane origin sits at N=0, E=0 by
+        // convention), shown only once the firmware has actually latched one
+        // (NavOriginSet) and only while it lies inside the current window.
+        if (m_haveOrigin) {
+            const QPointF o = toPxClamped(0.0, 0.0);
             if (std::abs(o.x() - centerPx.x()) <= halfPx + 0.5 &&
                 std::abs(o.y() - centerPx.y()) <= halfPx + 0.5) {
                 p.setPen(QPen(palette().color(QPalette::Text), 1));
@@ -114,16 +144,21 @@ protected:
             }
         }
 
-        // trail, oldest..newest, age-faded (newest brightest); grey when the
-        // horizontal state is dead reckoning, never claimed as anchored.
-        const QColor freshColor = m_anchored ? QColor(0x2e, 0x86, 0xde) : QColor(0x95, 0x95, 0x95);
+        // trail, oldest..newest, age-faded (newest brightest); grey (a
+        // palette role, not a fixed hex, so it stays distinguishable from
+        // the anchored colour in a dark theme too) when the horizontal state
+        // is dead reckoning, never claimed as anchored. Clipped to the
+        // window rect: points outside it are cut, not snapped onto the
+        // border.
+        const QColor freshColor = m_anchored ? QColor(0x2e, 0x86, 0xde) : palette().color(QPalette::Mid);
+        p.save();
+        p.setClipRect(windowRect);
         QPointF prev;
         bool havePrev = false;
         for (const Point &pt : m_points) {
-            const QPointF here = toPx(pt.north, pt.east);
-            const double ageFrac = qBound(0.0, double(pt.ageMs) / double(kTrailLengthMs), 1.0);
+            const QPointF here = toPxUnclamped(pt.north, pt.east);
             QColor c = freshColor;
-            c.setAlphaF(qBound(0.08, 1.0 - ageFrac, 1.0));
+            c.setAlphaF(posTrailAlpha(pt.ageMs));
             if (havePrev) {
                 p.setPen(QPen(c, 2));
                 p.drawLine(prev, here);
@@ -131,14 +166,45 @@ protected:
             prev = here;
             havePrev = true;
         }
+        p.restore();
 
-        // current position marker, always full-bright.
+        // current position marker, always full-bright, pinned to the frame
+        // if the window is smaller than the drift (it is offset (0,0) from
+        // itself, so clamped/unclamped agree here).
         p.setPen(Qt::NoPen);
-        p.setBrush(m_anchored ? QColor(0x27, 0xae, 0x60) : QColor(0x7f, 0x8c, 0x8d));
-        p.drawEllipse(toPx(m_currentNorth, m_currentEast), 5, 5);
+        p.setBrush(m_anchored ? QColor(0x27, 0xae, 0x60) : palette().color(QPalette::Mid));
+        const QPointF markerPx = toPxClamped(m_currentNorth, m_currentEast);
+        p.drawEllipse(markerPx, 5, 5);
+
+        // Velocity arrow + speed label at the marker (SYS2-GUI-003 pt.3):
+        // same anchoring colour as the trail, freezes with it under the
+        // STALE overlay below. Length = 1 s of travel at the current speed,
+        // scaled by the window's own px-per-metre -- so it reads "how far in
+        // one second" at a glance and shrinks/grows with the window like
+        // everything else on this plot, clamped to stay visible (>= 12 px)
+        // and to not swamp a small window (<= 60% of the half-window).
+        if (m_haveVelocity) {
+            const QColor col = m_anchored ? QColor(0x2e, 0x86, 0xde) : palette().color(QPalette::Mid);
+            if (m_arrowDir.x() != 0.0 || m_arrowDir.y() != 0.0) {
+                constexpr double kArrowSeconds = 1.0;   // design default: 1 s of travel
+                const double pxPerM = halfPx / (posWindowMetres(m_window) / 2.0);
+                const double lenPx = qBound(12.0, m_groundSpeedMs * kArrowSeconds * pxPerM, halfPx * 0.6);
+                const QPointF tip = markerPx + QPointF(m_arrowDir.x() * lenPx, m_arrowDir.y() * lenPx);
+                p.setPen(QPen(col, 2));
+                p.drawLine(markerPx, tip);
+                const QPointF perp(-m_arrowDir.y(), m_arrowDir.x());
+                const QPointF back = tip - QPointF(m_arrowDir.x() * 8.0, m_arrowDir.y() * 8.0);
+                p.drawLine(tip, back + perp * 4.0);
+                p.drawLine(tip, back - perp * 4.0);
+            }
+            p.setPen(col);
+            p.drawText(markerPx + QPointF(8, -8), QString("%1 m/s").arg(m_groundSpeedMs, 0, 'f', 2));
+        }
 
         if (!m_live) {
-            p.fillRect(area, QColor(255, 255, 255, 140));
+            QColor veil = palette().color(QPalette::Window);
+            veil.setAlpha(180);
+            p.fillRect(area, veil);
             p.setPen(QColor(0xc0, 0x39, 0x2b));
             QFont f = p.font();
             f.setBold(true);
@@ -156,6 +222,10 @@ private:
     bool m_live       = false;
     bool m_bound      = false;
     bool m_haveSample = false;
+    bool m_haveOrigin = false;
+    bool m_haveVelocity  = false;
+    double m_groundSpeedMs = 0.0;
+    QPointF m_arrowDir{0.0, 0.0};
 };
 
 // ---------------------------------------------------------------------------
@@ -179,6 +249,11 @@ public:
     void setAnchored(bool anchored) { m_anchored = anchored; update(); }
     void setLive(bool live)     { m_live = live; update(); }
     void setUp(double upM) { m_up = upM; update(); }
+    // Vertical rate "next to the altitude value" (SYS2-GUI-003 pt.3,
+    // acceptance (g)): Up rate = -NavVelDown, m/s. haveRate false (channel
+    // not decodable this sample) shows nothing, same degrade rule as
+    // everywhere else.
+    void setVerticalRate(bool haveRate, double upRateMs) { m_haveRate = haveRate; m_upRateMs = upRateMs; update(); }
 
 protected:
     void paintEvent(QPaintEvent *) override
@@ -209,8 +284,10 @@ protected:
 
         const double yClamped = qBound(area.top(), zeroY - m_up * pxPerM, area.bottom());
 
-        // filled bar from zero to the (clamped) current level
-        const QColor fill = m_anchored ? QColor(0x27, 0xae, 0x60) : QColor(0x7f, 0x8c, 0x8d);
+        // filled bar from zero to the (clamped) current level -- grey is a
+        // palette role, not a fixed hex, so it stays distinguishable from
+        // the anchored colour in a dark theme too (review finding MINOR 8).
+        const QColor fill = m_anchored ? QColor(0x27, 0xae, 0x60) : palette().color(QPalette::Mid);
         p.setPen(Qt::NoPen);
         p.setBrush(fill);
         p.drawRect(QRectF(barX - 8, qMin(zeroY, yClamped), 16, std::abs(zeroY - yClamped)));
@@ -232,8 +309,22 @@ protected:
         p.drawText(QRectF(0, height() - 12, width(), 12), Qt::AlignHCenter,
                    QString("-%1 m").arg(half, 0, 'f', 0));
 
+        // Vertical rate "next to the altitude value" (SYS2-GUI-003 pt.3):
+        // placed just below the marker line, or above it if that would run
+        // off the bottom -- same anchoring colour as the bar fill, freezes
+        // with it under the STALE overlay below.
+        if (m_haveRate) {
+            const double textY = (yClamped + 26.0 <= area.bottom()) ? yClamped + 2.0 : yClamped - 24.0;
+            const QString rateText = QString("%1%2 m/s")
+                .arg(m_upRateMs >= 0.0 ? "+" : "").arg(m_upRateMs, 0, 'f', 2);
+            p.setPen(m_anchored ? QColor(0x27, 0xae, 0x60) : palette().color(QPalette::Mid));
+            p.drawText(QRectF(area.left(), textY, area.width(), 12), Qt::AlignHCenter, rateText);
+        }
+
         if (!m_live) {
-            p.fillRect(area, QColor(255, 255, 255, 140));
+            QColor veil = palette().color(QPalette::Window);
+            veil.setAlpha(180);
+            p.fillRect(area, veil);
             p.setPen(QColor(0xc0, 0x39, 0x2b));
             p.drawText(rect(), Qt::AlignCenter | Qt::TextWordWrap, "STALE");
         }
@@ -246,6 +337,8 @@ private:
     bool m_live         = false;
     bool m_bound        = false;
     bool m_haveSample   = false;
+    bool m_haveRate     = false;
+    double m_upRateMs   = 0.0;
 };
 
 // ---------------------------------------------------------------------------
@@ -293,7 +386,7 @@ PositionView::PositionView(QWidget *parent)
     form->addRow("N:",  m_nLbl);
     form->addRow("E:",  m_eLbl);
     form->addRow("Up:", m_upLbl);
-    form->addRow("Vel N/E/D:", m_velLbl);
+    form->addRow("Vel N/E/Up:", m_velLbl);
     form->addRow("Horizontal:", m_horizLbl);
     form->addRow("Vertical:",   m_vertLbl);
     form->addRow("Origin:",     m_originLbl);
@@ -313,11 +406,13 @@ PositionView::PositionView(QWidget *parent)
     content->addWidget(m_altBar, 0);
     content->addWidget(sideWidget, 0);
 
+    m_introLbl = new QLabel;
+    m_introLbl->setWordWrap(true);
+    updateIntroText(false);   // no origin yet at construction
+
     auto *outer = new QVBoxLayout(this);
     outer->addWidget(m_bindStatusLbl);
-    outer->addWidget(new QLabel(
-        "Top-down N/E trail (north up, east right) and altitude, relative to "
-        "the tangent-plane origin. Grey trail = dead reckoning, no GNSS anchor."));
+    outer->addWidget(m_introLbl);
     outer->addLayout(content, 1);
 
     updateBoundState();
@@ -336,6 +431,7 @@ void PositionView::setAvailable(const QVector<A2lMeas> &meas)
     m_idxHorizOk     = indexOfMeas(meas, "NavHorizontalOk");
     m_idxOriginSet   = indexOfMeas(meas, "NavOriginSet");
     m_idxGnssNavOk   = indexOfMeas(meas, "GnssNavOk");
+    m_idxGnssFixType = indexOfMeas(meas, "GnssFixType");
     m_idxGnssNumSats = indexOfMeas(meas, "GnssNumSats");
     m_idxGnssHAcc    = indexOfMeas(meas, "GnssHAccuracy");
     m_idxAttState    = indexOfMeas(meas, "AttState");
@@ -346,6 +442,17 @@ void PositionView::setAvailable(const QVector<A2lMeas> &meas)
     // false trace of movement that never happened.
     resetTrail();
     updateBoundState();
+}
+
+void PositionView::updateIntroText(bool haveOrigin)
+{
+    m_introLbl->setText(haveOrigin
+        ? "Top-down N/E trail (north up, east right) and altitude, relative to "
+          "the tangent-plane origin (first usable GNSS fix). Grey trail = dead "
+          "reckoning, no GNSS anchor."
+        : "Top-down N/E trail (north up, east right) and altitude, relative to "
+          "power-on / dead reckoning (no GNSS origin latched yet). Grey trail = "
+          "dead reckoning, no GNSS anchor.");
 }
 
 void PositionView::updateBoundState()
@@ -371,14 +478,17 @@ void PositionView::showFrozenReadout()
     m_vertLbl->setText("-");
     m_originLbl->setText("-");
     m_stateLbl->setText(m_bound ? "-" : "n/a");
-    if (m_trail) {
-        m_trail->setHaveSample(false);
+    // Deliberately does NOT call setHaveSample(false): AttitudeView's
+    // pattern (attitudeview.cpp setConnected/setLive) keeps the last pose
+    // and only desaturates it -- a disconnect must show the frozen trail
+    // and altitude bar under the STALE overlay, not "no sample yet" (review
+    // finding MAJOR 3). If no sample ever arrived, m_haveSample is still
+    // false from construction, so "No position sample yet" is still shown
+    // correctly in that case.
+    if (m_trail)
         m_trail->setLive(false);
-    }
-    if (m_altBar) {
-        m_altBar->setHaveSample(false);
+    if (m_altBar)
         m_altBar->setLive(false);
-    }
 }
 
 void PositionView::resetTrail()
@@ -389,7 +499,7 @@ void PositionView::resetTrail()
 
 void PositionView::pruneTrail(qint64 nowMs)
 {
-    while (!m_trailPts.isEmpty() && (nowMs - m_trailPts.first().tMs) > kTrailLengthMs)
+    while (!m_trailPts.isEmpty() && (nowMs - m_trailPts.first().tMs) > kPosTrailLengthMs)
         m_trailPts.removeFirst();
 }
 
@@ -430,20 +540,26 @@ void PositionView::feedSample(const XcpClient::Measurements &m)
     const bool haveVelN = decodeIfFinite(m, m_meas, m_idxVelN, &velN);
     const bool haveVelE = decodeIfFinite(m, m_meas, m_idxVelE, &velE);
     const bool haveVelD = decodeIfFinite(m, m_meas, m_idxVelD, &velD);
+    const bool haveHorizVel = haveVelN && haveVelE;
+    // Up rate = -NavVelDown, through the SAME flip site as Up position
+    // (posUpFromDown) -- one flip site for every down-axis quantity.
+    const double velUp = haveVelD ? posUpFromDown(velD) : 0.0;
 
     double vertOkV = 0.0, horizOkV = 0.0, originSetV = 0.0;
     const bool navVerticalOk   = decodeIfFinite(m, m_meas, m_idxVertOk,    &vertOkV)   && vertOkV   != 0.0;
     const bool navHorizontalOk = decodeIfFinite(m, m_meas, m_idxHorizOk,   &horizOkV)  && horizOkV  != 0.0;
     const bool navOriginSet    = decodeIfFinite(m, m_meas, m_idxOriginSet, &originSetV) && originSetV != 0.0;
 
-    double gnssNavOkV = 0.0, numSatsV = -1.0, hAccV = -1.0;
-    const bool gnssNavOk = decodeIfFinite(m, m_meas, m_idxGnssNavOk, &gnssNavOkV) && gnssNavOkV != 0.0;
-    const bool haveSats  = decodeIfFinite(m, m_meas, m_idxGnssNumSats, &numSatsV);
-    const bool haveHAcc  = decodeIfFinite(m, m_meas, m_idxGnssHAcc, &hAccV);
+    double gnssNavOkV = 0.0, fixTypeV = -1.0, numSatsV = -1.0, hAccV = -1.0;
+    const bool gnssNavOk  = decodeIfFinite(m, m_meas, m_idxGnssNavOk, &gnssNavOkV) && gnssNavOkV != 0.0;
+    const bool haveFixType = decodeIfFinite(m, m_meas, m_idxGnssFixType, &fixTypeV);
+    const bool haveSats    = decodeIfFinite(m, m_meas, m_idxGnssNumSats, &numSatsV);
+    const bool haveHAcc    = decodeIfFinite(m, m_meas, m_idxGnssHAcc, &hAccV);
 
-    // Attitude-state gate, same channel/rule AttitudeView uses: without
-    // AttState in the A2L, live-with-caveat (never freeze forever silently);
-    // with it, only AttState == 2 (running) is live.
+    // Attitude-state gate (posIsLive, positionmath.h), same channel/rule
+    // AttitudeView uses: without AttState in the A2L, live-with-caveat
+    // (never freeze forever silently); with it, only AttState == 2
+    // (running) is live.
     const bool haveState = m_idxAttState >= 0;
     int state = -1;
     if (haveState) {
@@ -451,10 +567,11 @@ void PositionView::feedSample(const XcpClient::Measurements &m)
         if (decodeIfFinite(m, m_meas, m_idxAttState, &sv))
             state = int(sv);
     }
-    const bool live = haveState ? (state == 2) : true;
+    const bool live = posIsLive(haveState, state);
 
     const double up = posUpFromDown(posD);
     const PosAnchorState anchor = posAnchorState(navHorizontalOk, gnssNavOk, navVerticalOk,
+                                                  haveFixType ? int(fixTypeV) : -1,
                                                   haveSats ? int(numSatsV) : -1,
                                                   haveHAcc ? hAccV : -1.0);
 
@@ -471,6 +588,9 @@ void PositionView::feedSample(const XcpClient::Measurements &m)
     m_trail->setAnchored(anchor.horizontalAnchored);
     m_trail->setLive(live);
     m_trail->setHaveSample(true);
+    m_trail->setHaveOrigin(navOriginSet);
+    m_trail->setVelocity(haveHorizVel, haveHorizVel ? posGroundSpeed(velN, velE) : 0.0,
+                          haveHorizVel ? posVelocityArrowDir(velN, velE) : QPointF(0.0, 0.0));
     {
         QVector<PositionTrailWidget::Point> pts;
         pts.reserve(m_trailPts.size());
@@ -484,6 +604,7 @@ void PositionView::feedSample(const XcpClient::Measurements &m)
     m_altBar->setLive(live);
     m_altBar->setHaveSample(true);
     m_altBar->setUp(up);
+    m_altBar->setVerticalRate(haveVelD, velUp);
 
     // Readouts equal the plotted values at all times while connected
     // (SYS2-GUI-003 acceptance (a)) -- not gated on "live", same as
@@ -491,9 +612,13 @@ void PositionView::feedSample(const XcpClient::Measurements &m)
     m_nLbl->setText(QString::number(posN, 'f', 2) + " m");
     m_eLbl->setText(QString::number(posE, 'f', 2) + " m");
     m_upLbl->setText(QString::number(up, 'f', 2) + " m");
-    if (haveVelN && haveVelE && haveVelD) {
+    if (haveHorizVel && haveVelD) {
+        // velUp (computed above via posUpFromDown, the same flip site as the
+        // position's Up row) keeps the "Vel N/E/Up:" row's sign convention
+        // consistent with "Up:" above it, not a separately-written negation
+        // (review finding MAJOR 2).
         m_velLbl->setText(QString("%1 / %2 / %3 m/s")
-                              .arg(velN, 0, 'f', 2).arg(velE, 0, 'f', 2).arg(-velD, 0, 'f', 2));
+                              .arg(velN, 0, 'f', 2).arg(velE, 0, 'f', 2).arg(velUp, 0, 'f', 2));
     } else {
         m_velLbl->setText("-");
     }
@@ -507,6 +632,7 @@ void PositionView::feedSample(const XcpClient::Measurements &m)
         ? "QLabel { color: #27ae60; font-weight: bold; }"
         : "QLabel { color: palette(mid); font-style: italic; }");
     m_originLbl->setText(navOriginSet ? "set" : "not set");
+    updateIntroText(navOriginSet);
 
     if (!haveState) {
         m_stateLbl->setText("Running (state unknown - AttState not in A2L)");
