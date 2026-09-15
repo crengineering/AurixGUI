@@ -24,7 +24,7 @@ the firmware is nothing more than a new A2L entry here.
 | **Ethernet** | XCP connection to the ECU, A2L loading, connection status |
 | **Live Data** | System overview, cyclically polled: software version, uptime, die temperatures (DTS/DTSC), supply rails (1.25 V / 3.3 V / 5 V), base measurements |
 | **Sensors** | Sensor values grouped by device — IMU (ICM-42688-P), barometer (BMP581), magnetometer (MMC5983MA), GNSS (NEO-M9N). The tab is built at runtime from the loaded A2L |
-| **Diagnostics** | Diagnostic bits as a table, decoded from the A2L description |
+| **Diagnostics** | Diagnostic bits as a table, one section per A2L diagnostic word (e.g. `diagStatus`, `NavDiag`) — a new word in the firmware appears as a new section, nothing hardcoded |
 | **Calibration** | Read and write calibration values (RAM block) |
 | **DFLASH** | Read, write and verify persistent parameters — every A2L CHARACTERISTIC inside the Xcp_Nvm block, built at runtime like the Calibration tab |
 | **Plot & Log** | Freely configurable plots, channel selection, recording as **MF4** |
@@ -49,6 +49,7 @@ lands.
 | Magnetometer calibration CHARACTERISTICs (`NvmMagOffX/Y/Z`, `NvmMagScaleX/Y/Z`, `NvmMagDeclination`, already in `Xcp_Nvm`) | this commit (DFLASH tab rebuilt from the A2L, `xcppanel.cpp`) | 2026-09-13 |
 | Position/nav-fusion signals (`NavPosNorth/East/Down`, `NavVelNorth/East/Down`, `NavVerticalOk/HorizontalOk/OriginSet`, already in `Xcp_Fusion`; `GnssNavOk/NumSats/HAccuracy`, already in `Xcp_Data`) | commit `29d3351` (Position panel beside Attitude, `positionview.*`/`positionmath.*`) | 2026-09-14 |
 | `NavHorizontalOk` becomes a non-latching "trusted and fresh" flag; `NavGnssTrusted`/`NavStationaryLocked` added (`Xcp_Fusion` 0xBD/0xBE, fw ≥ 1.19.26, SWE1-FW-011/-014) | this commit (three-way horizontal anchoring text + LOCK badge, `positionview.*`/`positionmath.*`; older A2Ls without the two new channels still work via the `[legacy]`-tagged two-way reading) | 2026-09-15 |
+| Second diagnostics word `NavDiag` at the `Xcp_Fusion` tail (`0x700305FC`, `NavDiag_GnssUntrusted` bit 0, fw ≥ 1.19.30, SWE1-FW-011) | this commit (Diagnostics tab renders one section per A2L-derived diagnostic word instead of one hardcoded word, `diagmath.*`/`xcppanel.cpp`; an A2L with only the old `diagStatus` word still renders exactly as before) | 2026-09-15 |
 
 ![Sensors tab showing live IMU, barometer, magnetometer and GNSS values read from the ECU](docs/img/sensors-tab.png)
 
@@ -114,6 +115,9 @@ positionview.*      "Position" panel beside Attitude: A2L binding, trail/
                     altitude widgets, anchoring readout, stale state
 positionmath.*      pure window-scaling/sign-flip/anchoring-state logic
                     shared by positionview.cpp and position_selfcheck
+diagmath.*          pure Diagnostics-tab word-grouping logic (one section
+                    per A2L diagnostic word), shared by xcppanel.cpp and
+                    diag_selfcheck
 appicon.h           application icon
 lampicon.h          per-tab status lamps
 ```
