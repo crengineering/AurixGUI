@@ -44,6 +44,12 @@ add_executable(SerialMonitor
     attitudeview.h
     attitudeglwidget.cpp
     attitudeglwidget.h
+    positionmath.cpp
+    positionmath.h
+    positionview.cpp
+    positionview.h
+    diagmath.cpp
+    diagmath.h
     $<$<BOOL:${WIN32}>:app.rc>
 )
 
@@ -98,3 +104,39 @@ add_executable(attitude_selfcheck EXCLUDE_FROM_ALL
 target_include_directories(attitude_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(attitude_selfcheck PRIVATE Qt6::Widgets Qt6::OpenGLWidgets)
 add_test(NAME attitude_selfcheck COMMAND attitude_selfcheck)
+
+# Supporting unit-level evidence for SWE1-GUI-006/-007/-008 (vv: PIL -- the bench
+# acceptance is the qualifying level for the item; this self-check covers
+# only the pure logic underneath it): runs the position panel's window
+# scaling, the NED sign flip, the trail age-fade, the live/stale gate and the
+# anchoring truth table without a display or a QApplication -- see
+# tools/position_selfcheck_main.cpp. Deliberately links only positionmath.cpp,
+# not positionview.cpp, so this stays independent of the A2L/XCP/QWidget
+# machinery, same isolation attitude_selfcheck gives the handedness math.
+add_executable(position_selfcheck EXCLUDE_FROM_ALL
+    tools/position_selfcheck_main.cpp
+    positionmath.cpp
+    positionmath.h
+)
+target_include_directories(position_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(position_selfcheck PRIVATE Qt6::Core)
+add_test(NAME position_selfcheck COMMAND position_selfcheck)
+
+# Supporting unit-level evidence for the Diagnostics tab's multi-word
+# grouping (dispatched alongside SWE1-GUI-007's GNSS-trust amendment, fw
+# navDiag word at the Xcp_Fusion tail): runs buildDiagWordGroups() -- the
+# word-label derivation, the no-A2L fallback, and a real two-word A2L fixture
+# parsed through A2lModel::parseMeasurements -- without a display or a
+# QApplication -- see tools/diag_selfcheck_main.cpp. Links a2lmodel.cpp too
+# (the real parsing path is part of what this proves), not xcppanel.cpp, so
+# this stays independent of the QTableWidget/XCP machinery.
+add_executable(diag_selfcheck EXCLUDE_FROM_ALL
+    tools/diag_selfcheck_main.cpp
+    diagmath.cpp
+    diagmath.h
+    a2lmodel.cpp
+    a2lmodel.h
+)
+target_include_directories(diag_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(diag_selfcheck PRIVATE Qt6::Core)
+add_test(NAME diag_selfcheck COMMAND diag_selfcheck)

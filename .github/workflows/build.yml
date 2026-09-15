@@ -36,6 +36,20 @@ jobs:
         shell: cmd
         run: build\Release\attitude_selfcheck.exe
 
+      - name: Build position self-check (SWE1-GUI-006/-007/-008 evidence, headless)
+        run: cmake --build build --config Release --target position_selfcheck
+
+      - name: Run position self-check
+        shell: cmd
+        run: build\Release\position_selfcheck.exe
+
+      - name: Build diagnostics word-grouping self-check (headless)
+        run: cmake --build build --config Release --target diag_selfcheck
+
+      - name: Run diagnostics self-check
+        shell: cmd
+        run: build\Release\diag_selfcheck.exe
+
       - name: Deploy Qt DLLs
         run: windeployqt --release build/Release/SerialMonitor.exe
 
