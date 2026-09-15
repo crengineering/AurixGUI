@@ -28,7 +28,7 @@ the firmware is nothing more than a new A2L entry here.
 | **Calibration** | Read and write calibration values (RAM block) |
 | **DFLASH** | Read, write and verify persistent parameters — every A2L CHARACTERISTIC inside the Xcp_Nvm block, built at runtime like the Calibration tab |
 | **Plot & Log** | Freely configurable plots, channel selection, recording as **MF4** |
-| **Attitude** | 3D quadrocopter model driven by the firmware's `AttQuat0..3` body-to-NED quaternion (OpenGL); ground grid, N/E/D triad, mouse orbit/zoom, roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`; stale/disconnected pose is shown desaturated, never as live — beside it, a **Position** panel: top-down N/E trail (2/5/20 m window, age-faded, origin marker) with a velocity arrow and ground-speed label at the current position, altitude bar for `Up = -NavPosDown` with a vertical-rate readout, and a three-state anchoring readout (GNSS anchored / dead reckoning / baro anchored) |
+| **Attitude** | 3D quadrocopter model driven by the firmware's `AttQuat0..3` body-to-NED quaternion (OpenGL); ground grid, N/E/D triad, mouse orbit/zoom, roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`; stale/disconnected pose is shown desaturated, never as live — beside it, a **Position** panel: top-down N/E trail (2/5/20 m window, age-faded, origin marker) with a velocity arrow and ground-speed label at the current position, altitude bar for `Up = -NavPosDown` with a vertical-rate readout, a horizontal anchoring readout that reads "GNSS anchored" / "frozen — GNSS untrusted (hAcc > 4.0 m)" / "no fix — position held" from `NavGnssTrusted`+`NavHorizontalOk`+`GnssNavOk` (older A2Ls without `NavGnssTrusted` fall back to a two-way "\[legacy\]"-tagged reading), a vertical anchoring readout (baro anchored / no vertical anchor), and a LOCK badge from `NavStationaryLocked` explaining a pinned-to-zero velocity |
 
 The MF4 recording is deliberately standard-conforming, so measurement files can
 be evaluated without this tool — with asammdf, for instance.
@@ -48,6 +48,7 @@ lands.
 | 3D attitude view (`AttQuat0..3`/`AttRoll/Pitch/Yaw`/`AttState`, already in `Xcp_Fusion`) | this commit (Attitude tab, `attitudeview.*`/`attitudeglwidget.*`) | 2026-09-11 |
 | Magnetometer calibration CHARACTERISTICs (`NvmMagOffX/Y/Z`, `NvmMagScaleX/Y/Z`, `NvmMagDeclination`, already in `Xcp_Nvm`) | this commit (DFLASH tab rebuilt from the A2L, `xcppanel.cpp`) | 2026-09-13 |
 | Position/nav-fusion signals (`NavPosNorth/East/Down`, `NavVelNorth/East/Down`, `NavVerticalOk/HorizontalOk/OriginSet`, already in `Xcp_Fusion`; `GnssNavOk/NumSats/HAccuracy`, already in `Xcp_Data`) | commit `29d3351` (Position panel beside Attitude, `positionview.*`/`positionmath.*`) | 2026-09-14 |
+| `NavHorizontalOk` becomes a non-latching "trusted and fresh" flag; `NavGnssTrusted`/`NavStationaryLocked` added (`Xcp_Fusion` 0xBD/0xBE, fw ≥ 1.19.26, SWE1-FW-011/-014) | this commit (three-way horizontal anchoring text + LOCK badge, `positionview.*`/`positionmath.*`; older A2Ls without the two new channels still work via the `[legacy]`-tagged two-way reading) | 2026-09-15 |
 
 ![Sensors tab showing live IMU, barometer, magnetometer and GNSS values read from the ECU](docs/img/sensors-tab.png)
 

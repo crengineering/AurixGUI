@@ -52,7 +52,7 @@ public:
     {
         setMinimumSize(200, 200);
         setToolTip("Top-down N/E trail, north up, east right. Newest point brightest; "
-                   "grey means dead reckoning (no GNSS anchor).");
+                   "grey means not anchored (no fix, GNSS untrusted, or not yet latched).");
     }
 
     void setWindow(PosWindow w) { m_window = w; update(); }
@@ -147,10 +147,10 @@ protected:
 
         // trail, oldest..newest, age-faded (newest brightest); grey (a
         // palette role, not a fixed hex, so it stays distinguishable from
-        // the anchored colour in a dark theme too) when the horizontal state
-        // is dead reckoning, never claimed as anchored. Clipped to the
-        // window rect: points outside it are cut, not snapped onto the
-        // border.
+        // the anchored colour in a dark theme too) whenever the horizontal
+        // state is not anchored -- no fix, untrusted, or not yet latched --
+        // never claimed as anchored. Clipped to the window rect: points
+        // outside it are cut, not snapped onto the border.
         const QColor freshColor = m_anchored ? QColor(0x2e, 0x86, 0xde) : palette().color(QPalette::Mid);
         p.save();
         p.setClipRect(windowRect);
@@ -407,6 +407,15 @@ PositionView::PositionView(QWidget *parent)
     m_vertLbl   = new QLabel("-");
     m_originLbl = new QLabel("-");
     m_stateLbl  = new QLabel("Not connected");
+    // LOCK badge (SWE1-FW-014 -> SWE1-GUI-007 amendment): NavStationaryLocked
+    // = 1 explains why the velocities read exactly zero instead of just
+    // showing a suspiciously perfect 0.00. Palette-based colour (not a fixed
+    // hex) so it stays legible in a dark theme too, same reasoning as the
+    // trail/bar's grey.
+    m_lockLbl = new QLabel("-");
+    m_lockLbl->setAlignment(Qt::AlignCenter);
+    m_lockLbl->setToolTip("NavStationaryLocked: the estimator judged the vehicle stationary "
+                           "and pinned the velocities to zero and the position held.");
 
     auto *windowBox = new QGroupBox("Window");
     auto *windowLay = new QHBoxLayout(windowBox);
@@ -423,6 +432,7 @@ PositionView::PositionView(QWidget *parent)
     form->addRow("Vertical:",   m_vertLbl);
     form->addRow("Origin:",     m_originLbl);
     form->addRow("State:",      m_stateLbl);
+    form->addRow("Lock:",       m_lockLbl);
 
     auto *side = new QVBoxLayout;
     side->addWidget(windowBox);
@@ -466,6 +476,11 @@ void PositionView::setAvailable(const QVector<A2lMeas> &meas)
     m_idxGnssFixType = indexOfMeas(meas, "GnssFixType");
     m_idxGnssNumSats = indexOfMeas(meas, "GnssNumSats");
     m_idxGnssHAcc    = indexOfMeas(meas, "GnssHAccuracy");
+    // Optional (SWE1-GUI-007 amendment, fw >= 1.19.26): an older A2L simply
+    // does not have these, and the panel falls back to the pre-amendment
+    // two-way anchoring text (posAnchorState's haveGnssTrusted = false path).
+    m_idxGnssTrusted      = indexOfMeas(meas, "NavGnssTrusted");
+    m_idxStationaryLocked = indexOfMeas(meas, "NavStationaryLocked");
     m_idxAttState    = indexOfMeas(meas, "AttState");
 
     m_bound = m_idxPosN >= 0 && m_idxPosE >= 0 && m_idxPosD >= 0;
@@ -480,11 +495,12 @@ void PositionView::updateIntroText(bool haveOrigin)
 {
     m_introLbl->setText(haveOrigin
         ? "Top-down N/E trail (north up, east right) and altitude, relative to "
-          "the tangent-plane origin (first usable GNSS fix). Grey trail = dead "
-          "reckoning, no GNSS anchor."
+          "the tangent-plane origin (first usable GNSS fix). Grey trail = not "
+          "anchored (no fix, GNSS untrusted, or not yet latched) -- held, not "
+          "drifting."
         : "Top-down N/E trail (north up, east right) and altitude, relative to "
-          "power-on / dead reckoning (no GNSS origin latched yet). Grey trail = "
-          "dead reckoning, no GNSS anchor.");
+          "power-on (no GNSS origin latched yet). Grey trail = not anchored "
+          "(no fix, GNSS untrusted, or not yet latched) -- held, not drifting.");
 }
 
 void PositionView::updateBoundState()
@@ -510,6 +526,8 @@ void PositionView::showFrozenReadout()
     m_vertLbl->setText("-");
     m_originLbl->setText("-");
     m_stateLbl->setText(m_bound ? "-" : "n/a");
+    m_lockLbl->setText("-");
+    m_lockLbl->setStyleSheet(QString());
     // Deliberately does NOT call setHaveSample(false): AttitudeView's
     // pattern (attitudeview.cpp setConnected/setLive) keeps the last pose
     // and only desaturates it -- a disconnect must show the frozen trail
@@ -604,6 +622,20 @@ void PositionView::feedSample(const XcpClient::Measurements &m)
     const bool haveSats    = decodeIfFinite(m, m_meas, m_idxGnssNumSats, &numSatsV);
     const bool haveHAcc    = decodeIfFinite(m, m_meas, m_idxGnssHAcc, &hAccV);
 
+    // Optional (SWE1-GUI-007 amendment, fw >= 1.19.26): decodeIfFinite
+    // returns false outright when the channel is not bound (m_idx.. < 0), so
+    // haveGnssTrusted/haveStationaryLocked double as the "channel present in
+    // this A2L" flag posAnchorState()/posShowLockBadge() need for the
+    // fallback.
+    double gnssTrustedV = 0.0, stationaryLockedV = 0.0;
+    const bool haveGnssTrusted      = decodeIfFinite(m, m_meas, m_idxGnssTrusted, &gnssTrustedV);
+    const bool gnssTrusted          = haveGnssTrusted && gnssTrustedV != 0.0;
+    const bool haveStationaryLocked = decodeIfFinite(m, m_meas, m_idxStationaryLocked, &stationaryLockedV);
+    // posShowLockBadge (positionmath.h) is the SAME function position_selfcheck
+    // exercises -- one definition for "does the badge show", not a second
+    // inline copy of the "absent channel never shows a false LOCK" rule.
+    const bool showLockBadge = posShowLockBadge(haveStationaryLocked, stationaryLockedV != 0.0);
+
     // Attitude-state gate (posIsLive, positionmath.h), same channel/rule
     // AttitudeView uses: without AttState in the A2L, live-with-caveat
     // (never freeze forever silently); with it, only AttState == 2
@@ -621,7 +653,8 @@ void PositionView::feedSample(const XcpClient::Measurements &m)
     const PosAnchorState anchor = posAnchorState(navHorizontalOk, gnssNavOk, navVerticalOk,
                                                   haveFixType ? int(fixTypeV) : -1,
                                                   haveSats ? int(numSatsV) : -1,
-                                                  haveHAcc ? hAccV : -1.0);
+                                                  haveHAcc ? hAccV : -1.0,
+                                                  haveGnssTrusted, gnssTrusted);
 
     // Trail: only accumulated while live, same convention as AttitudeView's
     // 3D pose (frozen, not fed, while calibrating/aligning/no-sensor).
@@ -681,6 +714,23 @@ void PositionView::feedSample(const XcpClient::Measurements &m)
         : "QLabel { color: palette(mid); font-style: italic; }");
     m_originLbl->setText(navOriginSet ? "set" : "not set");
     updateIntroText(navOriginSet);
+
+    // LOCK badge (SWE1-FW-014 -> SWE1-GUI-007 amendment): says outright why
+    // the velocities are exactly zero instead of leaving Chris to guess.
+    // "n/a" (not "-") when the channel is not in the loaded A2L, same
+    // "cannot tell, don't pretend" rule as the GNSS detail fields above.
+    if (!haveStationaryLocked) {
+        m_lockLbl->setText("n/a");
+        m_lockLbl->setStyleSheet("QLabel { color: palette(mid); font-style: italic; }");
+    } else if (showLockBadge) {
+        m_lockLbl->setText("LOCK");
+        m_lockLbl->setStyleSheet("QLabel { background: palette(highlight); "
+                                  "color: palette(highlighted-text); font-weight: bold; "
+                                  "padding: 1px 6px; border-radius: 3px; }");
+    } else {
+        m_lockLbl->setText("-");
+        m_lockLbl->setStyleSheet(QString());
+    }
 
     if (!haveState) {
         m_stateLbl->setText("Running (state unknown - AttState not in A2L)");

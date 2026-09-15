@@ -59,16 +59,50 @@ double posTrailAlpha(qint64 ageMs, qint64 trailLengthMs = kPosTrailLengthMs);
 // only AttState == 2 (running) counts as live.
 bool posIsLive(bool haveAttState, int attState);
 
+// SWE1-GUI-007 amendment (fw >= 1.19.26, dated 2026-09-15): the firmware
+// changed `NavHorizontalOk` from a latch to "GNSS trusted and fresh"
+// (SWE1-FW-011, fusion.c: horizontalOk = originOk && gnssTrusted && fresh)
+// and added `NavGnssTrusted` (Xcp_Fusion 0xBD) / `NavStationaryLocked`
+// (0xBE). Critically, while NOT gnssTrusted the firmware HOLDS North/East --
+// it does NOT dead-reckon (propagate without a fix) -- so the old "dead
+// reckoning - drifts" wording misdescribes that state; it is dropped
+// everywhere below. Both new channels are optional (older A2L / fw < 1.19.26
+// still describes the old latch): haveGnssTrusted = false falls back to the
+// original two-way reading, distinguishable by its own "[legacy]" tag, since
+// there the GUI genuinely cannot tell "no fix" from "fix not yet trusted"
+// apart.
+//
+// FusGnssHAccMax (A2L CHARACTERISTIC, 0x7003063C) is the live-tunable trust
+// gate the firmware actually compares hAcc against; NAV_STRAND_2026-09.md
+// section 7 records the decision that it "stays at 4.0 m". kPosGnssHAccMaxM
+// mirrors that decided default for the "why untrusted" text below -- display
+// only, never fed back into a decision -- the same "design default" pattern
+// as kPosArrowMinSpeedMs. If the value is ever re-tuned on the bench this
+// text becomes stale and must be updated by hand; it is not read from the
+// live CHARACTERISTIC (that needs a synchronous XCP read cycle the DAQ path
+// does not have).
+inline constexpr double kPosGnssHAccMaxM = 4.0;
+
 // Three-state anchoring text (SYS2-GUI-003 pt.4 -- "Readouts", renumbered
 // when pt.3 "Speed at the drone marker" was inserted 2026-09-14), never
-// confusable with one
-// another:
-//   horizontal: "GNSS anchored (<fix>, n sats, hAcc x m)" iff navHorizontalOk
-//               AND gnssNavOk, else "dead reckoning - drifts (<fix detail>)"
-//               -- <fix detail> names GnssFixType (no fix / 2D / 3D /
-//               GNSS+DR), the channel that separates "no fix" from "fix
-//               exists but not yet trusted" (review finding MAJOR 1).
-//   vertical:   "baro anchored" iff navVerticalOk, else "no vertical anchor"
+// confusable with one another. With NavGnssTrusted available (haveGnssTrusted):
+//   navHorizontalOk                      -> "GNSS anchored (<fix>, n sats, hAcc x m)"
+//                                            (horizontalOk already implies
+//                                            gnssTrusted AND fresh in the
+//                                            firmware, so this needs nothing
+//                                            further)
+//   !navHorizontalOk && !gnssNavOk       -> "no fix - position held (...)"
+//   !navHorizontalOk && !gnssTrusted     -> "frozen - GNSS untrusted (hAcc x m > 4.0 m)"
+//   !navHorizontalOk && gnssTrusted      -> "not yet anchored (...)" (a fix
+//                                            exists and is trusted but not
+//                                            yet fresh/latched, e.g. origin
+//                                            not set yet -- transient)
+// Without it (legacy, haveGnssTrusted = false): the plain two-way reading,
+// "GNSS anchored (...)" iff navHorizontalOk AND gnssNavOk, else "not anchored
+// - position held [legacy: <fix detail>]" -- <fix detail> names GnssFixType
+// (no fix / 2D / 3D / GNSS+DR), the channel that separates "no fix" from "fix
+// exists but not yet trusted" (review finding MAJOR 1, SWE1-GUI-006).
+//   vertical: "baro anchored" iff navVerticalOk, else "no vertical anchor"
 // gnssFixType < 0 means "not available" (channel missing from the A2L);
 // gnssNumSats < 0 / gnssHAccuracyM < 0 likewise -- all render as "n/a"
 // rather than a bogus number.
@@ -80,7 +114,18 @@ struct PosAnchorState {
 };
 
 PosAnchorState posAnchorState(bool navHorizontalOk, bool gnssNavOk, bool navVerticalOk,
-                               int gnssFixType, int gnssNumSats, double gnssHAccuracyM);
+                               int gnssFixType, int gnssNumSats, double gnssHAccuracyM,
+                               bool haveGnssTrusted, bool gnssTrusted);
+
+// LOCK badge (SWE1-FW-014 -> SWE1-GUI-007 amendment, `NavStationaryLocked`,
+// Xcp_Fusion 0xBE): true iff the channel is present in the A2L AND the
+// firmware reports the stationary lock engaged (velocities pinned, position
+// held) -- an absent channel (older A2L) means "cannot tell", never a false
+// LOCK.
+inline bool posShowLockBadge(bool haveStationaryLocked, bool stationaryLocked)
+{
+    return haveStationaryLocked && stationaryLocked;
+}
 
 // "Speed at the drone marker" (SYS2-GUI-003 pt.3, added 2026-09-14 at
 // Chris's request, acceptance clause (g)): ground speed and the
