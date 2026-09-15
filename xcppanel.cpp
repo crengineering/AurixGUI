@@ -66,11 +66,12 @@ constexpr int     NVM_MAX_RETRIES = 10;
 // NvmMagOffX/Y/Z etc. to the firmware's A2L is now enough to make them
 // editable in the DFLASH tab; see rebuildNvmTable().
 
-// Fallback diagStatus bits, used only when no A2L is loaded. The live table is
-// built from the A2L BIT_MASK measurements (see rebuildDiagTable), so firmware
-// gaining a diagnostic bit needs no change here.
-struct DiagBit { int bit; const char *text; };
-constexpr DiagBit DIAG_BITS[] = {
+// Fallback diagStatus bits, used only when the loaded A2L has no BIT_MASK
+// measurement at all (no A2L loaded, or one predating BIT_MASK views). The
+// live sections are built from the A2L (see rebuildDiagTable /
+// buildDiagWordGroups in diagmath.h), so firmware gaining a diagnostic bit --
+// or a whole second diagnostic word, as NavDiag did -- needs no change here.
+const QVector<DiagRow> DIAG_FALLBACK_ROWS = {
     {0,  "DTS temperature too low (PMS sensor)"},
     {1,  "DTS temperature too high (PMS sensor)"},
     {2,  "DTSC temperature too low (SCU sensor)"},
@@ -86,7 +87,7 @@ constexpr DiagBit DIAG_BITS[] = {
     {12, "NVM fault (DFLASH corrupt or save failed)"},
     {31, "Calibration block invalid - defaults reloaded"},
 };
-constexpr int DIAG_ROWS = int(sizeof(DIAG_BITS) / sizeof(DIAG_BITS[0]));
+const QString DIAG_FALLBACK_LABEL = QStringLiteral("diagStatus");
 
 // Master list of channels the user can log to MF4. Each carries an accessor
 // from a received measurement frame; isFloat=false selects a uint32 column
@@ -403,70 +404,100 @@ void XcpPanel::updateSensorValues(const XcpClient::Measurements &m)
 }
 
 
-// Build the diagnostics table from the A2L: every MEASUREMENT that is a
-// BIT_MASK view on diagStatus becomes a row, with the A2L description as its
-// text. Falls back to the built-in list when no A2L is loaded.
+// Build the diagnostics sections from the A2L: buildDiagWordGroups()
+// (diagmath.h) groups every BIT_MASK measurement by the word (ECU_ADDRESS)
+// it is a view on -- one section per word, headed by the A2L-derived word
+// name (a plain measurement sharing the address, e.g. "DiagStatus"/"NavDiag",
+// or the bit names' shared prefix if none exists). Falls back to the
+// built-in diagStatus list only when the A2L has no BIT_MASK measurement at
+// all.
 //
-// This used to be a hardcoded array, which silently stopped at bit 12 when the
-// firmware grew the peripheral-fault bits: the new diagnostics existed on the
-// target and were simply invisible here.
+// This tab used to hardcode "one word" AND "which address that word sits
+// at" (only BIT_MASK measurements at exactly Xcp_Data + 0x24 became rows --
+// reading the bits themselves from the A2L was an earlier fix, but the
+// single fixed address remained). It went blind again when the firmware
+// added a SECOND word, NavDiag at the Xcp_Fusion tail, once diagStatus
+// filled up at 32/32 bits (SWE1-FW-011, fw >= 1.19.30): the new diagnostic
+// existed on the target and was parsed out of the A2L, but nothing here ever
+// looked at any address but the first. Grouping by whichever addresses the
+// loaded A2L actually uses removes that assumption the same way the Sensors
+// tab, the plot picker and the DFLASH tab already did for their own
+// hardcoded lists.
 void XcpPanel::rebuildDiagTable()
 {
-    m_diagRows.clear();
+    const QVector<DiagWordGroup> groups =
+        buildDiagWordGroups(m_meas, DIAG_FALLBACK_ROWS, DIAG_FALLBACK_LABEL);
 
-    for (const A2lMeas &mm : m_meas) {
-        if (!mm.isBitMask || mm.addr != (XCP_DATA_ADDR + 0x24u) || mm.bitMask == 0)
-            continue;
-        // BIT_MASK carries the mask; the row needs the bit position.
-        int bit = 0;
-        while (bit < 31 && ((mm.bitMask >> bit) & 1u) == 0u)
-            ++bit;
-        m_diagRows.append({bit, mm.desc.isEmpty() ? mm.name : mm.desc});
-    }
-
-    std::sort(m_diagRows.begin(), m_diagRows.end(),
-              [](const DiagRow &a, const DiagRow &b) { return a.bit < b.bit; });
-
-    if (m_diagRows.isEmpty())
-        for (const DiagBit &d : DIAG_BITS)
-            m_diagRows.append({d.bit, QString::fromUtf8(d.text)});
-
-    if (!m_diagTable)
+    if (!m_diagWordsPage)
         return;
 
-    m_diagTable->setRowCount(m_diagRows.size());
-    for (int i = 0; i < m_diagRows.size(); ++i) {
-        m_diagTable->setItem(i, 0, new QTableWidgetItem(QString::number(m_diagRows[i].bit)));
-        m_diagTable->setItem(i, 1, new QTableWidgetItem(m_diagRows[i].text));
-        m_diagTable->setItem(i, 2, new QTableWidgetItem("-"));
+    // Drop the previous sections; m_diagWords[i].wordLbl/table point into
+    // them, so the vector is rebuilt right alongside the widgets.
+    qDeleteAll(m_diagWordsPage->findChildren<QGroupBox *>(QString(), Qt::FindDirectChildrenOnly));
+    m_diagWords.clear();
+
+    auto *col = qobject_cast<QVBoxLayout *>(m_diagWordsPage->layout());
+    if (!col)
+        return;
+
+    QFont mono("Consolas");
+    mono.setStyleHint(QFont::Monospace);
+
+    for (const DiagWordGroup &g : groups) {
+        DiagWordUi ui;
+        ui.group = g;
+
+        auto *box = new QGroupBox(g.label);
+        auto *lay = new QVBoxLayout(box);
+
+        ui.wordLbl = new QLabel(g.label + ": -");
+        ui.wordLbl->setFont(mono);
+        lay->addWidget(ui.wordLbl);
+
+        ui.table = new QTableWidget(g.rows.size(), 3);
+        ui.table->setHorizontalHeaderLabels({"Bit", "Meaning", "Status"});
+        ui.table->verticalHeader()->setVisible(false);
+        ui.table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        ui.table->setSelectionMode(QAbstractItemView::NoSelection);
+        ui.table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+        for (int i = 0; i < g.rows.size(); ++i) {
+            ui.table->setItem(i, 0, new QTableWidgetItem(QString::number(g.rows[i].bit)));
+            ui.table->setItem(i, 1, new QTableWidgetItem(g.rows[i].text));
+            ui.table->setItem(i, 2, new QTableWidgetItem("-"));
+        }
+        lay->addWidget(ui.table);
+
+        col->addWidget(box);
+        m_diagWords.append(ui);
     }
-    m_haveStatus = false;        // force a repaint of the Status column
+
+    m_diagSummary->setText("Not connected");
+    updateDiagLamp();
 }
 
 QWidget *XcpPanel::buildDiagTab()
 {
-    m_diagWordLbl = new QLabel("diagStatus: -");
-    QFont mono("Consolas");
-    mono.setStyleHint(QFont::Monospace);
-    m_diagWordLbl->setFont(mono);
-
     m_diagSummary = new QLabel("Not connected");
     QFont bold = m_diagSummary->font();
     bold.setBold(true);
     bold.setPointSize(bold.pointSize() + 2);
     m_diagSummary->setFont(bold);
 
-    // Overall error lamp: one glance instead of scanning the bit table.
+    // Overall error lamp: one glance instead of scanning the bit tables.
     m_diagLamp = new QLabel;
     m_diagLamp->setPixmap(lampPixmap(LampColor::Gray, 18));
 
-    m_diagTable = new QTableWidget(0, 3);
-    m_diagTable->setHorizontalHeaderLabels({"Bit", "Meaning", "Status"});
-    m_diagTable->verticalHeader()->setVisible(false);
-    m_diagTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_diagTable->setSelectionMode(QAbstractItemView::NoSelection);
+    // One QGroupBox per diagnostic word, rebuilt by rebuildDiagTable() --
+    // same "scrollable page filled dynamically from the A2L" pattern as the
+    // Sensors tab (buildSensorsTab/rebuildSensorsTab), because the number of
+    // words is A2L-driven, not fixed at one.
+    m_diagWordsPage = new QWidget;
+    new QVBoxLayout(m_diagWordsPage);
     rebuildDiagTable();
-    m_diagTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+
+    auto *scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setWidget(m_diagWordsPage);
 
     auto *summaryRow = new QHBoxLayout;
     summaryRow->addWidget(m_diagLamp);
@@ -475,8 +506,7 @@ QWidget *XcpPanel::buildDiagTab()
     auto *tab    = new QWidget;
     auto *layout = new QVBoxLayout(tab);
     layout->addLayout(summaryRow);
-    layout->addWidget(m_diagWordLbl);
-    layout->addWidget(m_diagTable, 1);
+    layout->addWidget(scroll, 1);
     layout->addWidget(new QLabel("See DIAGNOSTICS.md in the firmware repository for details."));
     return tab;
 }
@@ -1231,7 +1261,7 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
         m_imuTempLbl->setText("n/a");
     }
 
-    updateDiagTable(m.diagStatus);
+    updateDiagTable(m);
 
     // plot + logging feed
     const double t = double(m_timeBase.elapsed()) / 1000.0;
@@ -1381,52 +1411,92 @@ void XcpPanel::updateLogStatus()
     }
 }
 
-void XcpPanel::updateDiagTable(quint32 status)
+// Decodes EVERY diagnostic word this sample's blocks cover (diagStatus out
+// of Xcp_Data, NavDiag out of Xcp_Fusion, and any future word wherever the
+// A2L puts it -- decodeFrom finds the right block by address, the same way
+// every other per-sample decode in this file already works) and updates
+// each word's own section, then the summary/lamp combined across all of
+// them. A word whose block has not arrived yet this sample (decodeFrom
+// returns false -- e.g. the very first sample) keeps its last known state,
+// same "keep last state" rule decodeIfFinite-style callers use elsewhere.
+void XcpPanel::updateDiagTable(const XcpClient::Measurements &m)
 {
-    if (m_haveStatus && status == m_lastStatus)
-        return;                                  // nothing changed
+    for (DiagWordUi &ui : m_diagWords) {
+        double v = 0.0;
+        if (!A2lModel::decodeFrom(m.blockBase, m.blockRaw, ui.group.wordMeas, &v))
+            continue;                              // block not covered yet; keep last state
+        const quint32 status = quint32(v);
 
-    m_diagWordLbl->setText("diagStatus: 0x"
-                           + QString("%1").arg(status, 8, 16, QChar('0')).toUpper());
+        if (ui.haveValue && status == ui.lastValue)
+            continue;                              // nothing changed for this word
 
-    if (status == 0) {
-        m_diagSummary->setText("Board OK");
-        m_diagSummary->setStyleSheet("color: green;");
-    } else {
+        if (ui.wordLbl)
+            ui.wordLbl->setText(ui.group.label + ": 0x"
+                                 + QString("%1").arg(status, 8, 16, QChar('0')).toUpper());
+
+        for (int i = 0; i < ui.group.rows.size(); ++i) {
+            const int  bit    = ui.group.rows[i].bit;
+            const bool active = ((status >> bit) & 1u) != 0u;
+            QTableWidgetItem *item = ui.table ? ui.table->item(i, 2) : nullptr;
+            if (!item)
+                continue;
+            item->setText(active ? "ERROR" : "OK");
+            item->setForeground(active ? QBrush(Qt::red) : QBrush(Qt::darkGreen));
+
+            // log newly appearing problems with their plain-text meaning,
+            // tagged with the word so two words never look like the same bit
+            const bool wasActive = ui.haveValue && (((ui.lastValue >> bit) & 1u) != 0u);
+            if (active && !wasActive)
+                m_log->appendPlainText("[Diagnostic (" + ui.group.label + "): " + ui.group.rows[i].text + "]");
+            else if (!active && wasActive)
+                m_log->appendPlainText("[Diagnostic cleared (" + ui.group.label + "): " + ui.group.rows[i].text + "]");
+        }
+
+        ui.lastValue = status;
+        ui.haveValue = true;
+    }
+
+    // Combined across every word: OK only once every word that has ever
+    // reported is 0; a stale "not seen yet" word does not count either way.
+    bool anyKnown = false, anyActive = false;
+    for (const DiagWordUi &ui : m_diagWords) {
+        if (!ui.haveValue)
+            continue;
+        anyKnown = true;
+        if (ui.lastValue != 0)
+            anyActive = true;
+    }
+
+    if (!anyKnown) {
+        m_diagSummary->setText("Not connected");
+        m_diagSummary->setStyleSheet(QString());
+    } else if (anyActive) {
         m_diagSummary->setText("ERROR detected");
         m_diagSummary->setStyleSheet("color: red;");
+    } else {
+        m_diagSummary->setText("Board OK");
+        m_diagSummary->setStyleSheet("color: green;");
     }
 
-    for (int i = 0; i < m_diagRows.size(); ++i) {
-        const int  bit    = m_diagRows[i].bit;
-        const bool active = ((status >> bit) & 1u) != 0u;
-        QTableWidgetItem *item = m_diagTable->item(i, 2);
-        if (!item)
-            continue;
-        item->setText(active ? "ERROR" : "OK");
-        item->setForeground(active ? QBrush(Qt::red) : QBrush(Qt::darkGreen));
-
-        // log newly appearing problems with their plain-text meaning
-        const bool wasActive = m_haveStatus && (((m_lastStatus >> bit) & 1u) != 0u);
-        if (active && !wasActive)
-            m_log->appendPlainText("[Diagnostic: " + m_diagRows[i].text + "]");
-        else if (!active && wasActive)
-            m_log->appendPlainText("[Diagnostic cleared: " + m_diagRows[i].text + "]");
-    }
-
-    m_lastStatus = status;
-    m_haveStatus = true;
     updateDiagLamp();
 }
 
 // Error lamp in the Diagnostics tab plus the matching sub-tab icon:
-// green = connected and no error bit set, red = at least one error,
-// gray = not connected (state unknown).
+// green = connected and no error bit set in any word, red = at least one
+// error in any word, gray = not connected (no word decoded yet).
 void XcpPanel::updateDiagLamp()
 {
     QColor color = LampColor::Gray;
-    if (m_haveStatus)
-        color = (m_lastStatus == 0) ? LampColor::Green : LampColor::Red;
+    bool anyKnown = false, anyActive = false;
+    for (const DiagWordUi &ui : m_diagWords) {
+        if (!ui.haveValue)
+            continue;
+        anyKnown = true;
+        if (ui.lastValue != 0)
+            anyActive = true;
+    }
+    if (anyKnown)
+        color = anyActive ? LampColor::Red : LampColor::Green;
 
     m_diagLamp->setPixmap(lampPixmap(color, 18));
     // Look the tab up rather than hardcoding its position: inserting the
@@ -1836,11 +1906,17 @@ void XcpPanel::setConnectedState(bool connected)
         m_identLbl->setText("-");
         m_diagSummary->setText("Not connected");
         m_diagSummary->setStyleSheet("");
-        m_diagWordLbl->setText("diagStatus: -");
-        m_haveStatus = false;
-        for (int i = 0; i < DIAG_ROWS; ++i) {
-            m_diagTable->item(i, 2)->setText("-");
-            m_diagTable->item(i, 2)->setForeground(QBrush());
+        for (DiagWordUi &ui : m_diagWords) {
+            ui.haveValue = false;
+            if (ui.wordLbl)
+                ui.wordLbl->setText(ui.group.label + ": -");
+            for (int i = 0; i < ui.group.rows.size() && ui.table; ++i) {
+                QTableWidgetItem *item = ui.table->item(i, 2);
+                if (!item)
+                    continue;
+                item->setText("-");
+                item->setForeground(QBrush());
+            }
         }
         updateDiagLamp();
     }

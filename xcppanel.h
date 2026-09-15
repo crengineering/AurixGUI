@@ -7,6 +7,7 @@
 #include "xcpclient.h"
 #include "mf4writer.h"
 #include "a2lmodel.h"
+#include "diagmath.h"
 #include <QJsonObject>
 
 class QLineEdit;
@@ -74,7 +75,7 @@ private:
     int      measurementBlockSize() const;  // Xcp_Data bytes the A2L describes
     // Every measurement block the A2L describes, not just Xcp_Data.
     QVector<XcpClient::Block> measurementBlocks() const;
-    void     updateDiagTable(quint32 status);
+    void     updateDiagTable(const XcpClient::Measurements &m);
     void     updateLogStatus();
     bool     chooseLogChannels(QVector<int> *out);   // pre-log channel picker
 
@@ -114,13 +115,24 @@ private:
     QLabel         *m_imuTempLbl   = nullptr;   // ICM-42688-P die temperature
     QPlainTextEdit *m_log        = nullptr;
 
-    // diagnostics tab
+    // diagnostics tab -- one section per diagnostic word (SWE1-GUI-005
+    // amendment, 2026-09-15: firmware >= 1.19.30 added a second word, NavDiag
+    // at the Xcp_Fusion tail, once diagStatus filled up at 32/32 bits).
+    // Sections are rebuilt from the A2L's BIT_MASK measurements grouped by
+    // buildDiagWordGroups() (diagmath.h), same "read whichever the loaded
+    // A2L actually describes" rule the Sensors tab and the plot picker
+    // already follow -- never a hardcoded single word.
     QLabel         *m_diagLamp    = nullptr;  // green = all good, red = error
-    QLabel         *m_diagWordLbl = nullptr;
-    QLabel         *m_diagSummary = nullptr;
-    QTableWidget   *m_diagTable   = nullptr;
-    quint32         m_lastStatus  = 0;
-    bool            m_haveStatus  = false;
+    QLabel         *m_diagSummary = nullptr;  // combined across every word
+    struct DiagWordUi {
+        DiagWordGroup group;                  // rows + addr + label + wordMeas
+        QLabel        *wordLbl   = nullptr;   // "<label>: 0x........"
+        QTableWidget  *table     = nullptr;
+        quint32        lastValue = 0;
+        bool           haveValue = false;
+    };
+    QVector<DiagWordUi> m_diagWords;
+    QWidget        *m_diagWordsPage = nullptr;  // filled by rebuildDiagTable()
 
     // calibration tab (RAM working page: individual writes, global read).
     // Rows are built from the A2L CHARACTERISTIC list (NVM block excluded);
@@ -153,9 +165,6 @@ private:
     // Sensors tab: built from the A2L MEASUREMENT list, grouped by name
     // prefix. m_sensorVal[i] is the value label for m_meas[i], so a new
     // MEASUREMENT in the A2L needs no GUI change at all.
-    // Diagnostics rows, built from the A2L BIT_MASK measurements.
-    struct DiagRow { int bit; QString text; };
-    QVector<DiagRow> m_diagRows;
     int              m_diagTabIndex = -1;
 
     QVector<A2lMeas> m_meas;

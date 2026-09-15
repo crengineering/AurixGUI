@@ -48,6 +48,8 @@ add_executable(SerialMonitor
     positionmath.h
     positionview.cpp
     positionview.h
+    diagmath.cpp
+    diagmath.h
     $<$<BOOL:${WIN32}>:app.rc>
 )
 
@@ -119,3 +121,22 @@ add_executable(position_selfcheck EXCLUDE_FROM_ALL
 target_include_directories(position_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(position_selfcheck PRIVATE Qt6::Core)
 add_test(NAME position_selfcheck COMMAND position_selfcheck)
+
+# Supporting unit-level evidence for the Diagnostics tab's multi-word
+# grouping (dispatched alongside SWE1-GUI-007's GNSS-trust amendment, fw
+# navDiag word at the Xcp_Fusion tail): runs buildDiagWordGroups() -- the
+# word-label derivation, the no-A2L fallback, and a real two-word A2L fixture
+# parsed through A2lModel::parseMeasurements -- without a display or a
+# QApplication -- see tools/diag_selfcheck_main.cpp. Links a2lmodel.cpp too
+# (the real parsing path is part of what this proves), not xcppanel.cpp, so
+# this stays independent of the QTableWidget/XCP machinery.
+add_executable(diag_selfcheck EXCLUDE_FROM_ALL
+    tools/diag_selfcheck_main.cpp
+    diagmath.cpp
+    diagmath.h
+    a2lmodel.cpp
+    a2lmodel.h
+)
+target_include_directories(diag_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(diag_selfcheck PRIVATE Qt6::Core)
+add_test(NAME diag_selfcheck COMMAND diag_selfcheck)
