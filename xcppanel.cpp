@@ -330,6 +330,8 @@ void XcpPanel::rebuildSensorsTab()
     qDeleteAll(m_sensorsPage->findChildren<QGroupBox *>(QString(), Qt::FindDirectChildrenOnly));
     m_sensorVal.clear();
     m_sensorVal.resize(m_meas.size());
+    for (EscCmpRow &r : m_escCmp)
+        r = EscCmpRow();                    // labels died with the old boxes
 
     auto *col = qobject_cast<QVBoxLayout *>(m_sensorsPage->layout());
     if (!col)
@@ -362,6 +364,56 @@ void XcpPanel::rebuildSensorsTab()
         else
             delete box;
     }
+
+    // ESC rpm comparison: KISS telemetry vs bidirectional DShot, side by side
+    // per motor. Signals are resolved by name; missing ones show "-".
+    {
+        static const char *const kFmt[5] = {
+            "EscM%1Rpm", "EscM%1ERpm100", "EscM%1BidirRpm",
+            "EscM%1BidirErpm", "EscM%1BidirOk" };
+        static const char *const kHead[5] = {
+            "KISS rpm", "KISS eRPM", "Bidir rpm", "Bidir eRPM", "Bidir OK" };
+        bool any = false;
+        for (int mtr = 0; mtr < 4; ++mtr)
+            for (int c = 0; c < 5; ++c) {
+                m_escCmp[mtr].idx[c] = -1;
+                const QString nm = QString::fromLatin1(kFmt[c]).arg(mtr + 1);
+                for (int i = 0; i < m_meas.size(); ++i)
+                    if (m_meas[i].name == nm) { m_escCmp[mtr].idx[c] = i; any = true; break; }
+            }
+        if (any) {
+            auto *box  = new QGroupBox(tr("ESC rpm - KISS telemetry vs bidirectional DShot"));
+            auto *grid = new QGridLayout(box);
+            grid->addWidget(new QLabel(tr("Motor")), 0, 0);
+            for (int c = 0; c < 5; ++c) {
+                auto *h = new QLabel(tr(kHead[c]));
+                h->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                grid->addWidget(h, 0, c + 1);
+                grid->setColumnStretch(c + 1, 1);
+            }
+            for (int mtr = 0; mtr < 4; ++mtr) {
+                grid->addWidget(new QLabel(QStringLiteral("M%1").arg(mtr + 1)), mtr + 1, 0);
+                for (int c = 0; c < 5; ++c) {
+                    auto *v = new QLabel("-");
+                    v->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                    v->setMinimumWidth(80);
+                    QFont f = v->font();
+                    f.setStyleHint(QFont::Monospace);
+                    f.setFamily(QStringLiteral("Consolas"));
+                    v->setFont(f);
+                    if (m_escCmp[mtr].idx[c] >= 0)
+                        v->setToolTip(m_meas[m_escCmp[mtr].idx[c]].desc);
+                    m_escCmp[mtr].lbl[c] = v;
+                    grid->addWidget(v, mtr + 1, c + 1);
+                }
+            }
+            // KISS eRPM is the raw field x100, shown as true electrical rpm.
+            grid->addWidget(new QLabel(tr("KISS eRPM = EscM<n>ERpm100 x 100 (true electrical rpm); "
+                                          "rpm columns are mechanical (eRPM / 7)")),
+                            5, 0, 1, 6);
+            col->insertWidget(0, box);
+        }
+    }
     col->addStretch(1);
 
     m_sensorsStatus->setText(m_meas.isEmpty()
@@ -374,6 +426,26 @@ void XcpPanel::updateSensorValues(const XcpClient::Measurements &m)
 {
     if (m.raw.isEmpty())
         return;
+
+    for (int mtr = 0; mtr < 4; ++mtr) {
+        for (int c = 0; c < 5; ++c) {
+            QLabel *lbl = m_escCmp[mtr].lbl[c];
+            const int idx = m_escCmp[mtr].idx[c];
+            if (!lbl)
+                continue;
+            double v = 0.0;
+            if (idx < 0 || idx >= m_meas.size() ||
+                !A2lModel::decodeFrom(m.blockBase, m.blockRaw, m_meas[idx], &v) ||
+                !std::isfinite(v)) {
+                lbl->setText("-");
+                continue;
+            }
+            if (c == 1)
+                v *= 100.0;                 // EscM<n>ERpm100 -> true eRPM
+            lbl->setText(c == 2 ? QString::number(v, 'f', 1)
+                                : QString::number(qint64(v)));
+        }
+    }
 
     for (int i = 0; i < m_meas.size() && i < m_sensorVal.size(); ++i) {
         QLabel *lbl = m_sensorVal[i];
@@ -393,6 +465,11 @@ void XcpPanel::updateSensorValues(const XcpClient::Measurements &m)
                              : QString::number(v, 'f', 3);
         if (!m_meas[i].unit.isEmpty())
             text += QLatin1Char(' ') + m_meas[i].unit;
+
+        // Raw fields scaled by 100 in the firmware (EscM<n>ERpm100): the A2L
+        // has no conversion for them, so say what the raw number means.
+        if (m_meas[i].name.endsWith(QLatin1String("ERpm100")))
+            text += QStringLiteral("  (= %1 eRPM)").arg(qint64(v) * 100);
 
         // Angles are the reason this tab exists; show degrees alongside rad,
         // because nobody eyeballs attitude in radians.

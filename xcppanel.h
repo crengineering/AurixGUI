@@ -169,6 +169,11 @@ private:
 
     QVector<A2lMeas> m_meas;
     QVector<QLabel*> m_sensorVal;
+    // Sensors tab, ESC rpm comparison box: per motor, indices into m_meas
+    // (-1 = not in the A2L) and the value labels. Columns: KISS rpm, KISS
+    // eRPM, bidir rpm, bidir eRPM, bidir OK count.
+    struct EscCmpRow { int idx[5] = { -1, -1, -1, -1, -1 }; QLabel *lbl[5] = {}; };
+    EscCmpRow        m_escCmp[4];
     QWidget         *m_sensorsPage   = nullptr;
     QLabel          *m_sensorsStatus = nullptr;
     QLabel         *m_a2lStatus    = nullptr;
