@@ -368,14 +368,14 @@ void XcpPanel::rebuildSensorsTab()
     // ESC rpm comparison: KISS telemetry vs bidirectional DShot, side by side
     // per motor. Signals are resolved by name; missing ones show "-".
     {
-        static const char *const kFmt[5] = {
-            "EscM%1Rpm", "EscM%1ERpm100", "EscM%1BidirRpm",
+        static const char *const kFmt[6] = {
+            "EscM%1DshotCmd", "EscM%1Rpm", "EscM%1ERpm100", "EscM%1BidirRpm",
             "EscM%1BidirErpm", "EscM%1BidirOk" };
-        static const char *const kHead[5] = {
-            "KISS rpm", "KISS eRPM", "Bidir rpm", "Bidir eRPM", "Bidir OK" };
+        static const char *const kHead[6] = {
+            "DShot cmd", "KISS rpm", "KISS eRPM", "Bidir rpm", "Bidir eRPM", "Bidir OK" };
         bool any = false;
         for (int mtr = 0; mtr < 4; ++mtr)
-            for (int c = 0; c < 5; ++c) {
+            for (int c = 0; c < 6; ++c) {
                 m_escCmp[mtr].idx[c] = -1;
                 const QString nm = QString::fromLatin1(kFmt[c]).arg(mtr + 1);
                 for (int i = 0; i < m_meas.size(); ++i)
@@ -385,7 +385,7 @@ void XcpPanel::rebuildSensorsTab()
             auto *box  = new QGroupBox(tr("ESC rpm - KISS telemetry vs bidirectional DShot"));
             auto *grid = new QGridLayout(box);
             grid->addWidget(new QLabel(tr("Motor")), 0, 0);
-            for (int c = 0; c < 5; ++c) {
+            for (int c = 0; c < 6; ++c) {
                 auto *h = new QLabel(tr(kHead[c]));
                 h->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
                 grid->addWidget(h, 0, c + 1);
@@ -393,7 +393,7 @@ void XcpPanel::rebuildSensorsTab()
             }
             for (int mtr = 0; mtr < 4; ++mtr) {
                 grid->addWidget(new QLabel(QStringLiteral("M%1").arg(mtr + 1)), mtr + 1, 0);
-                for (int c = 0; c < 5; ++c) {
+                for (int c = 0; c < 6; ++c) {
                     auto *v = new QLabel("-");
                     v->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
                     v->setMinimumWidth(80);
@@ -408,9 +408,10 @@ void XcpPanel::rebuildSensorsTab()
                 }
             }
             // KISS eRPM is the raw field x100, shown as true electrical rpm.
-            grid->addWidget(new QLabel(tr("KISS eRPM = EscM<n>ERpm100 x 100 (true electrical rpm); "
+            grid->addWidget(new QLabel(tr("DShot cmd = value on the wire (0 stop, 48..2047 throttle); "
+                                          "KISS eRPM = EscM<n>ERpm100 x 100 (true electrical rpm); "
                                           "rpm columns are mechanical (eRPM / 7)")),
-                            5, 0, 1, 6);
+                            5, 0, 1, 7);
             col->insertWidget(0, box);
         }
     }
@@ -428,7 +429,7 @@ void XcpPanel::updateSensorValues(const XcpClient::Measurements &m)
         return;
 
     for (int mtr = 0; mtr < 4; ++mtr) {
-        for (int c = 0; c < 5; ++c) {
+        for (int c = 0; c < 6; ++c) {
             QLabel *lbl = m_escCmp[mtr].lbl[c];
             const int idx = m_escCmp[mtr].idx[c];
             if (!lbl)
@@ -440,9 +441,9 @@ void XcpPanel::updateSensorValues(const XcpClient::Measurements &m)
                 lbl->setText("-");
                 continue;
             }
-            if (c == 1)
+            if (c == 2)
                 v *= 100.0;                 // EscM<n>ERpm100 -> true eRPM
-            lbl->setText(c == 2 ? QString::number(v, 'f', 1)
+            lbl->setText(c == 3 ? QString::number(v, 'f', 1)
                                 : QString::number(qint64(v)));
         }
     }
