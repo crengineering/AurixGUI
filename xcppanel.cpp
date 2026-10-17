@@ -2,6 +2,8 @@
 #include "plotwidget.h"
 #include "plotpane.h"
 #include "attitudeview.h"
+#include "motorview.h"
+#include "motormath.h"
 #include "positionview.h"
 #include <QGridLayout>
 #include <QSplitter>
@@ -214,6 +216,7 @@ XcpPanel::XcpPanel(QWidget *parent)
     m_subTabs->addTab(buildNvmTab(),  "DFLASH");
     m_subTabs->addTab(buildPlotTab(), "Plot && Log");
     m_subTabs->addTab(buildAttitudeTab(), "Attitude");
+    m_subTabs->addTab(buildMotorsTab(), "Motors");
     updateDiagLamp();
 
     auto *layout = new QVBoxLayout(this);
@@ -816,6 +819,10 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
         m_attitudeView->setAvailable(m_meas);
     if (m_positionView)
         m_positionView->setAvailable(m_meas);
+    if (m_motorView) {
+        m_motorView->setAvailable(m_meas);
+        m_motorView->setCharsAvailable(m_chars);
+    }
     emit a2lLoaded(m_meas);   // -> SystemFooter (Actuators lamps)
     emit a2lCharsLoaded(m_chars);   // -> SystemFooter (ARM/DISARM)
 }
@@ -1210,6 +1217,19 @@ void XcpPanel::relayoutPlots()
 // feedSample() in loadA2l() and onMeasurements() below, and AttitudeView's/
 // PositionView's own header comments. The attitude view itself is unchanged
 // by the position panel's addition (SYS2-GUI-003).
+// "Motors" tab: ARM/DISARM, manual throttle and per-motor sliders. The view
+// does no XCP I/O; its write requests land in writeMotorChar().
+QWidget *XcpPanel::buildMotorsTab()
+{
+    m_motorView = new MotorView;
+    m_motorView->setAvailable(m_meas);
+    m_motorView->setCharsAvailable(m_chars);
+    connect(m_motorView, &MotorView::armRequested,      this, &XcpPanel::armMotors);
+    connect(m_motorView, &MotorView::disarmRequested,   this, &XcpPanel::disarmMotors);
+    connect(m_motorView, &MotorView::writeCharRequested, this, &XcpPanel::writeMotorChar);
+    return m_motorView;
+}
+
 QWidget *XcpPanel::buildAttitudeTab()
 {
     m_attitudeView = new AttitudeView;
@@ -1383,6 +1403,8 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
         m_attitudeView->feedSample(m);
     if (m_positionView)
         m_positionView->feedSample(m);
+    if (m_motorView)
+        m_motorView->feedSample(m);
 
     if (m_logging) {
         QVector<double> values;
@@ -1837,6 +1859,27 @@ void XcpPanel::writeCharByName(const QString &name, quint32 value)
     m_log->appendPlainText(QString("[%1 not in loaded A2L - write aborted]").arg(name));
 }
 
+// "Motors" tab entry point: a CAL_motor* write requested by MotorView. Goes
+// through writeCharByName() (A2L lookup by name, XCP log) but is re-checked
+// here so no path can write while disconnected or put a DShot command
+// (1..47) into a manual setpoint, whatever the view does.
+void XcpPanel::writeMotorChar(const QString &name, quint32 value)
+{
+    if (!name.startsWith(QLatin1String("CAL_motor"))) {
+        m_log->appendPlainText(QString("[Motors: refused write to %1]").arg(name));
+        return;
+    }
+    if (!m_client->isConnected()) {
+        m_log->appendPlainText(QString("[Motors: not connected - write of %1 skipped]").arg(name));
+        return;
+    }
+    if (name.startsWith(QLatin1String("CAL_motorManualSp_")) && !motorDshotWritable(value)) {
+        m_log->appendPlainText(QString("[Motors: refused %1 = %2 (DShot 1..47 are commands)]").arg(name).arg(value));
+        return;
+    }
+    writeCharByName(name, value);
+}
+
 void XcpPanel::armMotors()
 {
     writeCharByName("CAL_motorCmd", 1);
@@ -2009,6 +2052,8 @@ void XcpPanel::setConnectedState(bool connected)
         m_attitudeView->setConnected(connected);
     if (m_positionView)
         m_positionView->setConnected(connected);
+    if (m_motorView)
+        m_motorView->setConnected(connected);
 
     m_connectBtn->setText(connected ? "Disconnect" : "Connect");
     m_hostEdit->setEnabled(!connected);

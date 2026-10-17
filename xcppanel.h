@@ -23,6 +23,7 @@ class PlotWidget;
 class PlotPane;
 class QGridLayout;
 class AttitudeView;
+class MotorView;
 class PositionView;
 
 // "Ethernet" tab: connects to the XCP slave on the TC399. Contains
@@ -42,6 +43,8 @@ public slots:
     // same onMemoryWritten()/onError() every Calibration tab write uses.
     void armMotors();
     void disarmMotors();
+    // Driven by the Motors tab (CAL_motor* writes only; see .cpp).
+    void writeMotorChar(const QString &name, quint32 value);
 
 signals:
     void connectionChanged(bool connected);   // drives the tab lamp icon
@@ -81,6 +84,7 @@ private:
     QWidget *buildNvmTab();
     QWidget *buildPlotTab();
     QWidget *buildAttitudeTab();
+    QWidget *buildMotorsTab();
     void     setConnectedState(bool connected);
     int      measurementBlockSize() const;  // Xcp_Data bytes the A2L describes
     // Every measurement block the A2L describes, not just Xcp_Data.
@@ -230,6 +234,7 @@ private:
     // its own signal selection and series; none exist until "Add plot".
     QVector<PlotPane *>  m_plotPanes;
     AttitudeView        *m_attitudeView = nullptr;   // "Attitude" sub-tab (SYS1-015)
+    MotorView           *m_motorView    = nullptr;   // "Motors" sub-tab
     PositionView        *m_positionView = nullptr;   // right half of "Attitude" tab (SYS1-016)
     QWidget             *m_plotGridHost = nullptr;
     QGridLayout         *m_plotGrid     = nullptr;

@@ -50,6 +50,9 @@ add_executable(SerialMonitor
     positionview.h
     diagmath.cpp
     diagmath.h
+    motorview.cpp
+    motorview.h
+    motormath.h
     $<$<BOOL:${WIN32}>:app.rc>
 )
 
@@ -140,3 +143,14 @@ add_executable(diag_selfcheck EXCLUDE_FROM_ALL
 target_include_directories(diag_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(diag_selfcheck PRIVATE Qt6::Core)
 add_test(NAME diag_selfcheck COMMAND diag_selfcheck)
+
+# Pure logic of the Motors tab (slider <-> DShot mapping: never 1..47 on the
+# wire, STOP position, bar scaling) -- header-only motormath.h, no display, no
+# QApplication. Same isolation as position_selfcheck.
+add_executable(motor_selfcheck EXCLUDE_FROM_ALL
+    tools/motor_selfcheck_main.cpp
+    motormath.h
+)
+target_include_directories(motor_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(motor_selfcheck PRIVATE Qt6::Core)
+add_test(NAME motor_selfcheck COMMAND motor_selfcheck)
