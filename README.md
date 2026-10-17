@@ -29,6 +29,7 @@ the firmware is nothing more than a new A2L entry here.
 | **DFLASH** | Read, write and verify persistent parameters — every A2L CHARACTERISTIC inside the Xcp_Nvm block, built at runtime like the Calibration tab |
 | **Plot & Log** | Freely configurable plots, channel selection, recording as **MF4** |
 | **Attitude** | 3D quadrocopter model driven by the firmware's `AttQuat0..3` body-to-NED quaternion (OpenGL); ground grid, N/E/D triad, mouse orbit/zoom, roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`; stale/disconnected pose is shown desaturated, never as live — beside it, a **Position** panel: top-down N/E trail (2/5/20 m window, age-faded, origin marker) with a velocity arrow and ground-speed label at the current position, altitude bar for `Up = -NavPosDown` with a vertical-rate readout, a horizontal anchoring readout that reads "GNSS anchored" / "frozen — GNSS untrusted (hAcc > 4.0 m)" / "no fix — position held" from `NavGnssTrusted`+`NavHorizontalOk`+`GnssNavOk` (older A2Ls without `NavGnssTrusted` fall back to a two-way "\[legacy\]"-tagged reading), a vertical anchoring readout (baro anchored / no vertical anchor), and a LOCK badge from `NavStationaryLocked` explaining a pinned-to-zero velocity |
+| **Motors** | ARM (with confirmation) / DISARM (kill button, no confirmation) / STOP ALL, a manual-throttle switch and one slider per motor (0 = stop, 48..2047; DShot commands 1..47 are never written), optional "link all four". Per motor: bar of the DShot value actually on the wire with the commanded value as a marker, big bidirectional-DShot rpm (KISS rpm only if `BidirRpm` is absent from the A2L, captioned as such), then two separate source blocks — *bidir DShot* (eRPM, ok count) and *KISS tlm* (rpm, eRPM×100, temperature, received/missed) — each value `--` with a tooltip when not in the A2L, plus the telemetry-alive lamp. Sliders are only live while connected, ARMED and the firmware has read back `CAL_motorManual` = 1 (checked once per second); a confirmed exit from ARMED resets them in the GUI, a stale link shows STALE/"unknown", never OFF. Everything is resolved by name from the A2L (`EscMotorState`, `EscM<n>*`, `CAL_motor*`); the KISS voltage/current/mAh values (invalid on the G55M) sit in a collapsed, labelled box |
 
 The MF4 recording is deliberately standard-conforming, so measurement files can
 be evaluated without this tool — with asammdf, for instance.
@@ -50,6 +51,7 @@ lands.
 | Position/nav-fusion signals (`NavPosNorth/East/Down`, `NavVelNorth/East/Down`, `NavVerticalOk/HorizontalOk/OriginSet`, already in `Xcp_Fusion`; `GnssNavOk/NumSats/HAccuracy`, already in `Xcp_Data`) | commit `29d3351` (Position panel beside Attitude, `positionview.*`/`positionmath.*`) | 2026-09-14 |
 | `NavHorizontalOk` becomes a non-latching "trusted and fresh" flag; `NavGnssTrusted`/`NavStationaryLocked` added (`Xcp_Fusion` 0xBD/0xBE, fw ≥ 1.19.26, SWE1-FW-011/-014) | this commit (three-way horizontal anchoring text + LOCK badge, `positionview.*`/`positionmath.*`; older A2Ls without the two new channels still work via the `[legacy]`-tagged two-way reading) | 2026-09-15 |
 | Second diagnostics word `NavDiag` at the `Xcp_Fusion` tail (`0x700305FC`, `NavDiag_GnssUntrusted` bit 0, fw ≥ 1.19.30, SWE1-FW-011) | this commit (Diagnostics tab renders one section per A2L-derived diagnostic word instead of one hardcoded word, `diagmath.*`/`xcppanel.cpp`; an A2L with only the old `diagStatus` word still renders exactly as before) | 2026-09-15 |
+| Motors tab: `CAL_motorCmd`/`CAL_motorManual`/`CAL_motorManualSp_M1..4` (`Xcp_Cal`) and the `Xcp_Esc` block (`EscMotorState`, `EscM<n>DshotCmd/BidirRpm/BidirErpm/BidirOk/Alive/…`), motor.c state machine with XCP-link failsafe | this commit (Motors tab, `motorview.*`/`motormath.h`; an A2L without them shows "not in this A2L" and stays inert) | 2026-10-17 |
 
 ![Sensors tab showing live IMU, barometer, magnetometer and GNSS values read from the ECU](docs/img/sensors-tab.png)
 
@@ -115,6 +117,10 @@ positionview.*      "Position" panel beside Attitude: A2L binding, trail/
                     altitude widgets, anchoring readout, stale state
 positionmath.*      pure window-scaling/sign-flip/anchoring-state logic
                     shared by positionview.cpp and position_selfcheck
+motorview.*         "Motors" tab: ARM/DISARM, manual throttle, per-motor sliders,
+                    live ESC readout (XCP writes go through XcpPanel)
+motormath.h         pure slider<->DShot mapping / bar scaling, shared by
+                    motorview.cpp and motor_selfcheck
 diagmath.*          pure Diagnostics-tab word-grouping logic (one section
                     per A2L diagnostic word), shared by xcppanel.cpp and
                     diag_selfcheck

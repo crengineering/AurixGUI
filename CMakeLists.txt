@@ -50,6 +50,9 @@ add_executable(SerialMonitor
     positionview.h
     diagmath.cpp
     diagmath.h
+    motorview.cpp
+    motorview.h
+    motormath.h
     $<$<BOOL:${WIN32}>:app.rc>
 )
 
@@ -140,3 +143,43 @@ add_executable(diag_selfcheck EXCLUDE_FROM_ALL
 target_include_directories(diag_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(diag_selfcheck PRIVATE Qt6::Core)
 add_test(NAME diag_selfcheck COMMAND diag_selfcheck)
+
+# Pure logic of the Motors tab (slider <-> DShot mapping: never 1..47 on the
+# wire, STOP position, bar scaling) -- header-only motormath.h, no display, no
+# QApplication. Same isolation as position_selfcheck.
+add_executable(motor_selfcheck EXCLUDE_FROM_ALL
+    tools/motor_selfcheck_main.cpp
+    motormath.h
+)
+target_include_directories(motor_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(motor_selfcheck PRIVATE Qt6::Core)
+add_test(NAME motor_selfcheck COMMAND motor_selfcheck)
+
+# Widget-level safety self-check of the Motors tab: MotorView on the offscreen
+# platform with a synthetic A2L and synthetic read-backs (no XCP, no board).
+# Links motorview.cpp + a2lmodel.cpp, not xcppanel.cpp.
+add_executable(motor_view_selfcheck EXCLUDE_FROM_ALL
+    tools/motor_view_selfcheck_main.cpp
+    motorview.cpp
+    motorview.h
+    motormath.h
+    a2lmodel.cpp
+    a2lmodel.h
+)
+target_include_directories(motor_view_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(motor_view_selfcheck PRIVATE Qt6::Widgets Qt6::Network)
+add_test(NAME motor_view_selfcheck COMMAND motor_view_selfcheck)
+
+# XCP transport queue (Coalesce / Priority / purgeWrites, DISARM purge) and the
+# Motors read-back parser, tested without a socket: the friend
+# XcpClientTestAccess drives XcpClient's private queue.
+add_executable(xcp_queue_selfcheck EXCLUDE_FROM_ALL
+    tools/xcp_queue_selfcheck_main.cpp
+    xcpclient.cpp
+    xcpclient.h
+    motorproto.h
+    a2lmodel.h
+)
+target_include_directories(xcp_queue_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(xcp_queue_selfcheck PRIVATE Qt6::Core Qt6::Network)
+add_test(NAME xcp_queue_selfcheck COMMAND xcp_queue_selfcheck)

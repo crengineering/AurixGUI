@@ -50,6 +50,27 @@ jobs:
         shell: cmd
         run: build\Release\diag_selfcheck.exe
 
+      - name: Build Motors slider-mapping self-check (headless)
+        run: cmake --build build --config Release --target motor_selfcheck
+
+      - name: Run Motors self-check
+        shell: cmd
+        run: build\Release\motor_selfcheck.exe
+
+      - name: Build Motors tab safety self-check (offscreen)
+        run: cmake --build build --config Release --target motor_view_selfcheck
+
+      - name: Run Motors tab safety self-check
+        shell: cmd
+        run: build\Release\motor_view_selfcheck.exe
+
+      - name: Build XCP queue self-check (headless)
+        run: cmake --build build --config Release --target xcp_queue_selfcheck
+
+      - name: Run XCP queue self-check
+        shell: cmd
+        run: build\Release\xcp_queue_selfcheck.exe
+
       - name: Deploy Qt DLLs
         run: windeployqt --release build/Release/SerialMonitor.exe
 

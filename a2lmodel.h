@@ -11,13 +11,14 @@
 // the firmware description instead of a hardcoded list. Only the record
 // layouts this project uses are understood (float32 / uint32 / uint8).
 
-enum class A2lType { Float32, Uint32, Uint16, Uint8 };
+enum class A2lType { Float32, Uint32, Sint32, Uint16, Uint8 };
 
 inline int a2lTypeSize(A2lType t)
 {
     switch (t) {
     case A2lType::Float32: return 4;
     case A2lType::Uint32:  return 4;
+    case A2lType::Sint32:  return 4;
     case A2lType::Uint16:  return 2;
     case A2lType::Uint8:   return 1;
     }

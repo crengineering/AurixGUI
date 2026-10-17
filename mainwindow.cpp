@@ -155,6 +155,14 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(xcpPanel, &XcpPanel::measurementsUpdated,
             m_footer, &SystemFooter::update);
+    connect(xcpPanel, &XcpPanel::a2lLoaded,
+            m_footer, &SystemFooter::setAvailable);
+    connect(xcpPanel, &XcpPanel::a2lCharsLoaded,
+            m_footer, &SystemFooter::setCharsAvailable);
+    connect(m_footer, &SystemFooter::armRequested,
+            xcpPanel, &XcpPanel::armMotors);
+    connect(m_footer, &SystemFooter::disarmRequested,
+            xcpPanel, &XcpPanel::disarmMotors);
 
     // ---- Signals/Slots ----
     connect(m_refreshBtn, &QPushButton::clicked,    this, &MainWindow::refreshPorts);

@@ -68,6 +68,7 @@ bool mapBaseType(const QString &bt, A2lType *out)
 {
     if (bt == QLatin1String("FLOAT32_IEEE")) { *out = A2lType::Float32; return true; }
     if (bt == QLatin1String("ULONG"))        { *out = A2lType::Uint32;  return true; }
+    if (bt == QLatin1String("SLONG"))        { *out = A2lType::Sint32;  return true; }
     if (bt == QLatin1String("UWORD"))        { *out = A2lType::Uint16;  return true; }
     if (bt == QLatin1String("UBYTE"))        { *out = A2lType::Uint8;   return true; }
     return false;                   // other base types are not needed here
@@ -166,6 +167,7 @@ const QVector<A2lGroup> &A2lModel::groups()
         { QStringLiteral("Navigation - position, velocity, biases"), QStringLiteral("Nav")    },
         { QStringLiteral("Flight control feedback (rad, body)"),     QStringLiteral("Ctrl")   },
         { QStringLiteral("Sensor fusion (scaffold)"),                QStringLiteral("Fusion") },
+        { QStringLiteral("ESC"),                                     QStringLiteral("Esc")    },
         { QStringLiteral("Core load"),                               QStringLiteral("Core")   },
         { QStringLiteral("Ethernet"),                                QStringLiteral("Eth")    },
     };
@@ -252,6 +254,7 @@ bool A2lModel::decode(const QByteArray &raw, quint32 blockBase,
     switch (m.type) {
     case A2lType::Float32: { float f = 0.0f; std::memcpy(&f, d, sizeof(f)); *out = double(f); break; }
     case A2lType::Uint32:  *out = double(qFromLittleEndian<quint32>(d)); break;
+    case A2lType::Sint32:  *out = double(qFromLittleEndian<qint32>(d));  break;
     case A2lType::Uint16:  *out = double(qFromLittleEndian<quint16>(d)); break;
     case A2lType::Uint8:   *out = double(quint8(*d));                    break;
     }

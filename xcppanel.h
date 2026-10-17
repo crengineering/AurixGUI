@@ -3,6 +3,10 @@
 
 #include <QWidget>
 #include <QElapsedTimer>
+#include <QMap>
+#include <QQueue>
+#include "motorproto.h"
+#include <QSet>
 #include <QVector>
 #include "xcpclient.h"
 #include "mf4writer.h"
@@ -23,6 +27,7 @@ class PlotWidget;
 class PlotPane;
 class QGridLayout;
 class AttitudeView;
+class MotorView;
 class PositionView;
 
 // "Ethernet" tab: connects to the XCP slave on the TC399. Contains
@@ -35,9 +40,25 @@ class XcpPanel : public QWidget
 public:
     explicit XcpPanel(QWidget *parent = nullptr);
 
+public slots:
+    // Driven by SystemFooter's ARM/DISARM buttons. Both resolve CAL_motorCmd
+    // against the loaded A2L by name and write it like any other
+    // characteristic - errors and the confirming read-back go through the
+    // same onMemoryWritten()/onError() every Calibration tab write uses.
+    void armMotors();
+    void disarmMotors();
+    void stopAllMotors();
+    void readMotorBack();
+    // Driven by the Motors tab (CAL_motor* writes only; see .cpp).
+    void writeMotorChar(const QString &name, quint32 value);
+
 signals:
     void connectionChanged(bool connected);   // drives the tab lamp icon
     void measurementsUpdated(const XcpClient::Measurements &m);  // -> SystemFooter
+    void a2lLoaded(const QVector<A2lMeas> &meas);  // -> SystemFooter (Actuators lamps)
+    // fresh = the read was issued after the last CAL_motor* write was enqueued
+    void motorCharsRead(const QMap<QString, quint32> &values, bool fresh);  // -> Motors tab (read-back, by name)
+    void a2lCharsLoaded(const QVector<A2lChar> &chars);  // -> SystemFooter (ARM/DISARM)
 
 private slots:
     void toggleConnection();
@@ -71,7 +92,9 @@ private:
     QWidget *buildNvmTab();
     QWidget *buildPlotTab();
     QWidget *buildAttitudeTab();
+    QWidget *buildMotorsTab();
     void     setConnectedState(bool connected);
+    void     updateMotorReadBackState();
     int      measurementBlockSize() const;  // Xcp_Data bytes the A2L describes
     // Every measurement block the A2L describes, not just Xcp_Data.
     QVector<XcpClient::Block> measurementBlocks() const;
@@ -138,6 +161,13 @@ private:
     // Rows are built from the A2L CHARACTERISTIC list (NVM block excluded);
     // row index == index into m_chars.
     void            writeCalRow(int row);
+    // Look up a CHARACTERISTIC by name in m_chars and write it. Shared by
+    // writeCalRow() (kept as-is, it writes the row's edited text) and
+    // armMotors()/disarmMotors(), which write a fixed value instead of a
+    // table cell. Logs and aborts if the A2L does not describe the name.
+    bool            writeCharByName(const QString &name, quint32 value,
+                                    XcpClient::WriteMode mode = XcpClient::WriteMode::Normal);
+    bool            handleMotorRead(quint32 address, const QByteArray &data);
     void            loadA2l(const QString &path, bool remember);
     QWidget        *buildSensorsTab();
     void            rebuildDiagTable();
@@ -157,7 +187,7 @@ private:
     void            rebuildSensorsTab();
     void            updateSensorValues(const XcpClient::Measurements &m);
     void            rebuildCalTable();
-    bool            populateCharsFromRead(quint32 base, const QByteArray &data);
+    bool            populateCharsFromRead(quint32 base, const QByteArray &data, bool quiet = false);
     QString         defaultA2lPath() const;
     QVector<A2lChar> m_chars;
     QString         m_a2lPath;
@@ -215,6 +245,15 @@ private:
     // its own signal selection and series; none exist until "Add plot".
     QVector<PlotPane *>  m_plotPanes;
     AttitudeView        *m_attitudeView = nullptr;   // "Attitude" sub-tab (SYS1-015)
+    MotorView           *m_motorView    = nullptr;   // "Motors" sub-tab
+    QTimer              *m_motorSpReadTimer = nullptr;   // 200 ms after the last Sp write
+    QElapsedTimer        m_motorReadClock;
+    MotorReadTags        m_motorReadTags;               // write-seq at issue time, one per read in flight
+    quint32              m_motorWriteSeq = 0;           // bumped by every CAL_motor* write enqueued
+    quint32              m_motorLastReadSeq = 0;
+    bool                 m_motorSpanLogged = false;
+    QElapsedTimer        m_disarmClock;                  // kill-latency evidence
+    bool                 m_disarmPending = false;
     PositionView        *m_positionView = nullptr;   // right half of "Attitude" tab (SYS1-016)
     QWidget             *m_plotGridHost = nullptr;
     QGridLayout         *m_plotGrid     = nullptr;
