@@ -216,11 +216,13 @@ MotorView::MotorView(QWidget *parent)
         u.erpmLbl   = new QLabel("--");
         u.tempLbl   = new QLabel("--");
         u.countsLbl = new QLabel("--");
-        for (QLabel *l : { u.dshotLbl, u.erpmLbl, u.tempLbl, u.countsLbl }) {
+        u.kRpmLbl   = new QLabel("--");
+        u.kErpmLbl  = new QLabel("--");
+        u.tlmLbl    = new QLabel("--");
+        for (QLabel *l : { u.dshotLbl, u.erpmLbl, u.tempLbl, u.countsLbl, u.kRpmLbl, u.kErpmLbl, u.tlmLbl }) {
             l->setFont(mono);
             l->setAlignment(Qt::AlignRight);
         }
-        u.countsLbl->setFont(smallMono);
         u.aliveLamp = new QLabel;
         u.aliveLbl  = new QLabel("--");
 
@@ -234,9 +236,20 @@ MotorView::MotorView(QWidget *parent)
         barRow->addStretch(1);
 
         auto *form = new QGridLayout;
-        form->addWidget(new QLabel(tr("DShot")), 0, 0); form->addWidget(u.dshotLbl, 0, 1);
-        form->addWidget(new QLabel(tr("eRPM")),  1, 0); form->addWidget(u.erpmLbl,  1, 1);
-        form->addWidget(new QLabel(tr("Temp")),  2, 0); form->addWidget(u.tempLbl,  2, 1);
+        auto section = [&](int row, const QString &title) {
+            auto *h = new QLabel(title);
+            h->setStyleSheet("QLabel { font-weight: bold; }");
+            form->addWidget(h, row, 0, 1, 2);
+        };
+        form->addWidget(new QLabel(tr("DShot out")), 0, 0); form->addWidget(u.dshotLbl, 0, 1);
+        section(1, tr("bidir DShot"));
+        form->addWidget(new QLabel(tr("eRPM")),   2, 0); form->addWidget(u.erpmLbl,   2, 1);
+        form->addWidget(new QLabel(tr("ok")),     3, 0); form->addWidget(u.countsLbl, 3, 1);
+        section(4, tr("KISS tlm"));
+        form->addWidget(new QLabel(tr("rpm")),    5, 0); form->addWidget(u.kRpmLbl,   5, 1);
+        form->addWidget(new QLabel(tr("eRPM x100")), 6, 0); form->addWidget(u.kErpmLbl, 6, 1);
+        form->addWidget(new QLabel(tr("temp")),   7, 0); form->addWidget(u.tempLbl,   7, 1);
+        form->addWidget(new QLabel(tr("tlm/miss")), 8, 0); form->addWidget(u.tlmLbl,  8, 1);
         form->setColumnStretch(1, 1);
 
         auto *col = new QVBoxLayout(u.box);
@@ -246,7 +259,6 @@ MotorView::MotorView(QWidget *parent)
         col->addWidget(u.spin);
         col->addLayout(form);
         col->addLayout(aliveRow);
-        col->addWidget(u.countsLbl);
 
         motorsRow->addWidget(u.box, 1);
 
@@ -453,14 +465,35 @@ void MotorView::feedSample(const XcpClient::Measurements &m)
             u.rpmCaption->setText(tr("rpm (not in A2L)"));
         }
 
-        if (dec(x.bidirErpm, &v))
-            u.erpmLbl->setText(QString::number(v, 'f', 0));
-        else if (dec(x.erpm100, &v))
-            u.erpmLbl->setText(QString::number(v * 100.0, 'f', 0));
-        else
-            u.erpmLbl->setText("--");
-
-        u.tempLbl->setText(dec(x.temp, &v) ? QString::number(v, 'f', 0) + QStringLiteral(" °C") : QStringLiteral("--"));
+        // Each source row stands on its own; a missing measurement shows
+        // "--" with a tooltip, never a value borrowed from the other source.
+        auto show = [&](QLabel *l, int idx, double scale, const QString &suffix, int prec = 0) {
+            double d = 0.0;
+            if (idx < 0) {
+                l->setText("--");
+                l->setToolTip(tr("not in this A2L"));
+            } else {
+                l->setToolTip(QString());
+                l->setText(dec(idx, &d) ? QString::number(d * scale, 'f', prec) + suffix : QStringLiteral("--"));
+            }
+        };
+        show(u.erpmLbl,  x.bidirErpm, 1.0,   QString());
+        show(u.countsLbl, x.bidirOk,  1.0,   QString());
+        show(u.kRpmLbl,  x.rpm,       1.0,   QString());
+        show(u.kErpmLbl, x.erpm100,   100.0, QString());
+        show(u.tempLbl,  x.temp,      1.0,   QStringLiteral(" °C"));
+        {
+            double tc = 0, tm = 0;
+            if (x.tlmCount < 0 || x.tlmMissed < 0) {
+                u.tlmLbl->setText("--");
+                u.tlmLbl->setToolTip(tr("not in this A2L"));
+            } else {
+                u.tlmLbl->setToolTip(QString());
+                u.tlmLbl->setText(dec(x.tlmCount, &tc) && dec(x.tlmMissed, &tm)
+                                      ? QStringLiteral("%1/%2").arg(tc, 0, 'f', 0).arg(tm, 0, 'f', 0)
+                                      : QStringLiteral("--"));
+            }
+        }
 
         double cmd = 0.0;
         const bool haveCmd = dec(x.dshot, &cmd);
@@ -475,13 +508,6 @@ void MotorView::feedSample(const XcpClient::Measurements &m)
             u.aliveLamp->setPixmap(bulbPixmap(LampColor::Gray, false));
             u.aliveLbl->setText(tr("--"));
         }
-
-        double ok = 0, tc = 0, tm = 0;
-        const bool hOk = dec(x.bidirOk, &ok), hTc = dec(x.tlmCount, &tc), hTm = dec(x.tlmMissed, &tm);
-        u.countsLbl->setText(QStringLiteral("ok %1  tlm %2/%3")
-                                 .arg(hOk ? QString::number(ok, 'f', 0) : "--",
-                                      hTc ? QString::number(tc, 'f', 0) : "--",
-                                      hTm ? QString::number(tm, 'f', 0) : "--"));
 
         double vc = 0, ca = 0, mah = 0;
         const bool hV = dec(x.volt, &vc), hC = dec(x.cur, &ca), hM = dec(x.mah, &mah);
@@ -508,6 +534,9 @@ void MotorView::showReadoutsStale()
         u.tempLbl->setText("--");
         u.dshotLbl->setText("--");
         u.countsLbl->setText("--");
+        u.kRpmLbl->setText("--");
+        u.kErpmLbl->setText("--");
+        u.tlmLbl->setText("--");
         u.aliveLbl->setText("--");
         u.aliveLamp->setPixmap(bulbPixmap(LampColor::Gray, false));
         u.bar->setActual(0.0, false);
