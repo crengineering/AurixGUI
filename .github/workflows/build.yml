@@ -64,6 +64,13 @@ jobs:
         shell: cmd
         run: build\Release\motor_view_selfcheck.exe
 
+      - name: Build XCP queue self-check (headless)
+        run: cmake --build build --config Release --target xcp_queue_selfcheck
+
+      - name: Run XCP queue self-check
+        shell: cmd
+        run: build\Release\xcp_queue_selfcheck.exe
+
       - name: Deploy Qt DLLs
         run: windeployqt --release build/Release/SerialMonitor.exe
 

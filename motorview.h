@@ -47,7 +47,10 @@ public slots:
     // Read-back of CAL_motorCmd / CAL_motorManual / CAL_motorManualSp_M1..4
     // from XcpPanel, keyed by characteristic NAME. This (plus EscMotorState)
     // is the only source for the manual toggle and the slider enable state.
-    void onCharsRead(const QMap<QString, quint32> &values);
+    // fresh = the read was issued after the last CAL_motor* write was enqueued;
+    // a stale reply never confirms a pending manual on/off step.
+    void onCharsRead(const QMap<QString, quint32> &values, bool fresh = true);
+    void setReadBackProblem(const QString &reason);   // read-back window unusable (A2L layout)
 
 signals:
     void armRequested();
@@ -120,6 +123,7 @@ private:
     int  m_state      = -1;      // EscMotorState, -1 unknown
     Manual  m_manual  = Manual::Off;       // from read-back only, never from our own write
     Pending m_pendingOp = Pending::None;
+    QString m_readBackProblem;             // non-empty: manual ON can never be confirmed
     QString m_notice;                      // why the tab changed its mind (shown in the hint)
     bool    m_locked  = false;             // DISARM sent, waiting for the firmware to confirm
     bool m_inLink     = false;   // re-entrancy guard for "link all four"

@@ -169,3 +169,17 @@ add_executable(motor_view_selfcheck EXCLUDE_FROM_ALL
 target_include_directories(motor_view_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(motor_view_selfcheck PRIVATE Qt6::Widgets Qt6::Network)
 add_test(NAME motor_view_selfcheck COMMAND motor_view_selfcheck)
+
+# XCP transport queue (Coalesce / Priority / purgeWrites, DISARM purge) and the
+# Motors read-back parser, tested without a socket: the friend
+# XcpClientTestAccess drives XcpClient's private queue.
+add_executable(xcp_queue_selfcheck EXCLUDE_FROM_ALL
+    tools/xcp_queue_selfcheck_main.cpp
+    xcpclient.cpp
+    xcpclient.h
+    motorproto.h
+    a2lmodel.h
+)
+target_include_directories(xcp_queue_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(xcp_queue_selfcheck PRIVATE Qt6::Core Qt6::Network)
+add_test(NAME xcp_queue_selfcheck COMMAND xcp_queue_selfcheck)

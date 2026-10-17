@@ -158,6 +158,14 @@ int main(int argc, char **argv)
         check("Manual click: those writes are zeros, manual NOT yet written", allZero);
         r.readBack(0, 100);   // Sp not zero
         check("Sp read-back non-zero: manual=1 still not written", r.countWrites("CAL_motorManual") == 0);
+        {
+            QMap<QString, quint32> z;
+            z["CAL_motorManual"] = 0;
+            for (int i = 1; i <= 4; ++i) z[QString("CAL_motorManualSp_M%1").arg(i)] = 0;
+            r.view.onCharsRead(z, /*fresh=*/false);   // reply to a read issued BEFORE the writes
+            check("stale (pre-write) zeros reply does not confirm: manual=1 still not written",
+                  r.countWrites("CAL_motorManual") == 0);
+        }
         r.readBack(0, 0);
         check("Sp read-back four zeros: manual=1 written after the Sp zeros",
               r.writes.size() == 5 && r.writes.last().first == "CAL_motorManual" && r.writes.last().second == 1);

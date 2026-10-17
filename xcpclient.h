@@ -118,7 +118,8 @@ public:
     // appending. Priority = place at the head of the queue, right after the
     // request that is already in flight (used for DISARM / STOP ALL).
     enum class WriteMode { Normal, Coalesce, Priority };
-    void writeMemory(quint32 address, const QByteArray &data,
+    // Returns false when nothing was enqueued (not connected / bad size).
+    bool writeMemory(quint32 address, const QByteArray &data,
                      WriteMode mode = WriteMode::Normal); // -> memoryWritten()
     // Drop queued (not in-flight) writes to these addresses.
     void purgeWrites(const QSet<quint32> &addresses);
@@ -153,6 +154,7 @@ private slots:
     void onKeepaliveTimer();
 
 private:
+    friend struct XcpClientTestAccess;   // host self-check drives the queue without a socket
     enum class ReqType { Connect, GetId, UploadId, PollChunk,
                          MemRead, MemWrite, DaqCmd, DaqStart, GetStatus };
     struct Request {

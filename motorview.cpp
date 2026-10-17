@@ -615,7 +615,7 @@ void MotorView::showReadoutsStale()
 
 bool MotorView::manualWritable() const
 {
-    return m_connected && m_charsOk && !isStale() && m_state == 2;
+    return m_connected && m_charsOk && m_readBackProblem.isEmpty() && !isStale() && m_state == 2;
 }
 
 bool MotorView::slidersEnabled() const
@@ -630,6 +630,8 @@ QString MotorView::disabledReason() const
         return tr("Not connected.");
     if (!m_charsOk || m_idxState < 0)
         return tr("Not in this A2L (needs EscMotorState and CAL_motorCmd / CAL_motorManual / CAL_motorManualSp_M1..4).");
+    if (!m_readBackProblem.isEmpty())
+        return tr("Manual throttle disabled: %1.").arg(m_readBackProblem);
     if (isStale())
         return tr("STALE: no ESC sample in the last 1.5 s - manual state unknown, sliders off. DISARM / STOP ALL still work.");
     if (m_state != 2)
@@ -850,7 +852,13 @@ void MotorView::pendingTimeout()
     }
 }
 
-void MotorView::onCharsRead(const QMap<QString, quint32> &v)
+void MotorView::setReadBackProblem(const QString &reason)
+{
+    m_readBackProblem = reason;
+    updateControls();
+}
+
+void MotorView::onCharsRead(const QMap<QString, quint32> &v, bool fresh)
 {
     if (!m_connected || m_state != 2 || !v.contains(QStringLiteral("CAL_motorManual")))
         return;
@@ -859,6 +867,15 @@ void MotorView::onCharsRead(const QMap<QString, quint32> &v)
     for (int i = 0; i < kMotors; ++i)
         spZero = spZero && v.contains(spName(i)) && v.value(spName(i)) == 0u;
 
+    if (!fresh && m_pendingOp != Pending::None) {
+        // A reply to a read issued before our last write says nothing about
+        // that write -- ask again instead of accepting it.
+        QTimer::singleShot(150, this, [this]() {
+            if (m_pendingOp != Pending::None)
+                emit readBackRequested();
+        });
+        return;
+    }
     switch (m_pendingOp) {
     case Pending::AwaitZeros:
         if (spZero) {

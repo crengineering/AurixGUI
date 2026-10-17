@@ -4,6 +4,7 @@
 #include "attitudeview.h"
 #include "motorview.h"
 #include "motormath.h"
+#include "motorproto.h"
 #include "positionview.h"
 #include <QGridLayout>
 #include <QSplitter>
@@ -822,6 +823,7 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
     if (m_motorView) {
         m_motorView->setAvailable(m_meas);
         m_motorView->setCharsAvailable(m_chars);
+        updateMotorReadBackState();
     }
     emit a2lLoaded(m_meas);   // -> SystemFooter (Actuators lamps)
     emit a2lCharsLoaded(m_chars);   // -> SystemFooter (ARM/DISARM)
@@ -1217,6 +1219,21 @@ void XcpPanel::relayoutPlots()
 // feedSample() in loadA2l() and onMeasurements() below, and AttitudeView's/
 // PositionView's own header comments. The attitude view itself is unchanged
 // by the position panel's addition (SYS2-GUI-003).
+// Without a usable read-back window the manual ON handshake could only time
+// out; say why once in the log and in the tab instead.
+void XcpPanel::updateMotorReadBackState()
+{
+    const MotorReadPlan plan = motorReadPlan(m_chars);
+    if (m_motorView)
+        m_motorView->setReadBackProblem(plan.reason);
+    if (!plan.reason.isEmpty() && !m_motorSpanLogged) {
+        m_motorSpanLogged = true;
+        m_log->appendPlainText("[Motors] " + plan.reason);
+    }
+    if (plan.reason.isEmpty())
+        m_motorSpanLogged = false;
+}
+
 // "Motors" tab: ARM/DISARM, manual throttle and per-motor sliders. The view
 // does no XCP I/O; its write requests land in writeMotorChar().
 QWidget *XcpPanel::buildMotorsTab()
@@ -1224,6 +1241,7 @@ QWidget *XcpPanel::buildMotorsTab()
     m_motorView = new MotorView;
     m_motorView->setAvailable(m_meas);
     m_motorView->setCharsAvailable(m_chars);
+    updateMotorReadBackState();
     connect(m_motorView, &MotorView::armRequested,      this, &XcpPanel::armMotors);
     connect(m_motorView, &MotorView::disarmRequested,   this, &XcpPanel::disarmMotors);
     connect(m_motorView, &MotorView::writeCharRequested, this, &XcpPanel::writeMotorChar);
@@ -1869,7 +1887,7 @@ void XcpPanel::writeCalRow(int row)
 // like a Calibration tab row. onMemoryWritten()/onError() then take over
 // logging and the confirming read-back, same as any other characteristic
 // write.
-void XcpPanel::writeCharByName(const QString &name, quint32 value, XcpClient::WriteMode mode)
+bool XcpPanel::writeCharByName(const QString &name, quint32 value, XcpClient::WriteMode mode)
 {
     for (const A2lChar &c : m_chars) {
         if (c.name != name)
@@ -1878,12 +1896,15 @@ void XcpPanel::writeCharByName(const QString &name, quint32 value, XcpClient::Wr
         const QByteArray bytes = encodeCharValue(c, QString::number(value), &ok);
         if (!ok) {
             m_log->appendPlainText(QString("[Invalid value for %1 - aborted]").arg(name));
-            return;
+            return false;
         }
-        m_client->writeMemory(c.addr, bytes, mode);
-        return;
+        const bool sent = m_client->writeMemory(c.addr, bytes, mode);
+        if (sent && motorIsMotorChar(name))
+            ++m_motorWriteSeq;      // reads issued before this are stale w.r.t. it
+        return sent;
     }
     m_log->appendPlainText(QString("[%1 not in loaded A2L - write aborted]").arg(name));
+    return false;
 }
 
 // "Motors" tab entry point: a CAL_motor* write requested by MotorView. Goes
@@ -1916,81 +1937,70 @@ void XcpPanel::armMotors()
     writeCharByName("CAL_motorCmd", 1);
 }
 
-// Addresses of CAL_motorManualSp_M1..4, resolved by name.
-QSet<quint32> XcpPanel::motorSetpointAddrs() const
-{
-    QSet<quint32> addrs;
-    for (const A2lChar &c : m_chars)
-        if (c.name.startsWith(QLatin1String("CAL_motorManualSp_")))
-            addrs.insert(c.addr);
-    return addrs;
-}
-
-// Kill path: queued setpoint writes are dropped and CAL_motorCmd=0 goes to the
-// head of the XCP queue (behind only the request already in flight). Also
-// used by the footer's DISARM button.
+// Kill path: EVERY queued CAL_motor* write (ARM, manual, setpoints) is
+// dropped, then CAL_motorCmd=0 goes to the head of the XCP queue (behind only
+// the request already in flight). A queued ARM can therefore never execute
+// after the DISARM. Also used by the footer's DISARM button.
 void XcpPanel::disarmMotors()
 {
-    m_client->purgeWrites(motorSetpointAddrs());
+    if (!m_client->isConnected()) {
+        m_log->appendPlainText("[Motors] DISARM requested while disconnected - nothing sent");
+        return;
+    }
+    m_client->purgeWrites(motorWriteAddrs(m_chars, /*setpointsOnly=*/false));
     m_disarmClock.start();
-    m_disarmPending = m_client->isConnected();
-    m_log->appendPlainText(QString("[Motors] DISARM sent, t=%1 ms").arg(m_timeBase.elapsed()));
-    writeCharByName("CAL_motorCmd", 0, XcpClient::WriteMode::Priority);
+    const bool sent = writeCharByName("CAL_motorCmd", 0, XcpClient::WriteMode::Priority);
+    m_disarmPending = sent;
+    m_log->appendPlainText(sent ? QString("[Motors] DISARM sent, t=%1 ms").arg(m_timeBase.elapsed())
+                                : QString("[Motors] DISARM requested but not sent (CAL_motorCmd unavailable)"));
 }
 
 void XcpPanel::stopAllMotors()
 {
-    m_client->purgeWrites(motorSetpointAddrs());
+    if (!m_client->isConnected()) {
+        m_log->appendPlainText("[Motors] STOP ALL requested while disconnected - nothing sent");
+        return;
+    }
+    m_client->purgeWrites(motorWriteAddrs(m_chars, /*setpointsOnly=*/true));
     m_log->appendPlainText(QString("[Motors] STOP ALL sent, t=%1 ms").arg(m_timeBase.elapsed()));
     for (const A2lChar &c : m_chars)
-        if (c.name.startsWith(QLatin1String("CAL_motorManualSp_")))
+        if (motorIsSetpointChar(c.name))
             writeCharByName(c.name, 0, XcpClient::WriteMode::Priority);
 }
 
-// One SHORT_UPLOAD over CAL_motorCmd .. CAL_motorManualSp_M4 (a contiguous
-// 16-byte range in the current A2L; span computed from the A2L, not assumed).
-// The reply is parsed in onMemoryRead() and handed to the Motors tab by name.
+// One SHORT_UPLOAD over CAL_motorCmd .. CAL_motorManualSp_M4 (window from the
+// A2L, see motorproto.h). The reply is parsed in handleMotorRead() and handed
+// to the Motors tab by name. A read is only deduplicated against one issued
+// AFTER the last CAL_motor* write: a read that predates a write can never
+// stand in for the read-back that confirms it.
 void XcpPanel::readMotorBack()
 {
     if (!m_client->isConnected() || m_chars.isEmpty())
         return;
-    if (m_motorReadClock.isValid() && m_motorReadClock.elapsed() < 120)
-        return;                 // an identical read is already on its way
-    quint32 lo = 0xFFFFFFFFu, hi = 0;
-    for (const A2lChar &c : m_chars) {
-        if (!c.name.startsWith(QLatin1String("CAL_motor")))
-            continue;
-        lo = qMin(lo, c.addr);
-        hi = qMax(hi, c.addr + quint32(a2lTypeSize(c.type)));
-    }
-    if (hi <= lo || hi - lo > 63u)
-        return;
+    const MotorReadPlan plan = motorReadPlan(m_chars);
+    if (!plan.ok)
+        return;                 // reason is shown in the tab (see loadA2l)
+    if (m_motorReadClock.isValid() && m_motorReadClock.elapsed() < 120
+        && m_motorLastReadSeq == m_motorWriteSeq && !m_motorReadTags.isEmpty())
+        return;                 // an equivalent read is already on its way
     m_motorReadClock.restart();
-    m_motorReadLo = lo;
-    m_motorReadLen = int(hi - lo);
-    m_client->readMemory(lo, quint8(m_motorReadLen));
+    m_motorLastReadSeq = m_motorWriteSeq;
+    m_motorReadTags.enqueue(m_motorWriteSeq);
+    while (m_motorReadTags.size() > 8)
+        m_motorReadTags.dequeue();   // lost replies (XCP error) must not pile up
+    m_client->readMemory(plan.lo, quint8(plan.len));
 }
 
 bool XcpPanel::handleMotorRead(quint32 address, const QByteArray &data)
 {
-    if (address != m_motorReadLo || data.size() != m_motorReadLen)
+    const MotorReadPlan plan = motorReadPlan(m_chars);
+    const QMap<QString, quint32> values = motorParseRead(m_chars, plan, address, data);
+    if (values.isEmpty())
         return false;
-    QMap<QString, quint32> values;
-    for (const A2lChar &c : m_chars) {
-        if (!c.name.startsWith(QLatin1String("CAL_motor")) || c.addr < address)
-            continue;
-        const int off = int(c.addr - address);
-        const int sz = a2lTypeSize(c.type);
-        if (off + sz > data.size())
-            continue;
-        const uchar *p = reinterpret_cast<const uchar *>(data.constData()) + off;
-        if (sz == 2)
-            values.insert(c.name, qFromLittleEndian<quint16>(p));
-        else if (sz == 4)
-            values.insert(c.name, qFromLittleEndian<quint32>(p));
-    }
+    const quint32 tag = m_motorReadTags.isEmpty() ? 0u : m_motorReadTags.dequeue();
+    const bool fresh = (tag == m_motorWriteSeq);
     populateCharsFromRead(address, data, /*quiet=*/true);   // keep the Calibration rows current
-    emit motorCharsRead(values);
+    emit motorCharsRead(values, fresh);
     return true;
 }
 
