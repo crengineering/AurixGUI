@@ -1227,6 +1227,14 @@ QWidget *XcpPanel::buildMotorsTab()
     connect(m_motorView, &MotorView::armRequested,      this, &XcpPanel::armMotors);
     connect(m_motorView, &MotorView::disarmRequested,   this, &XcpPanel::disarmMotors);
     connect(m_motorView, &MotorView::writeCharRequested, this, &XcpPanel::writeMotorChar);
+    connect(m_motorView, &MotorView::stopAllRequested,  this, &XcpPanel::stopAllMotors);
+    connect(m_motorView, &MotorView::readBackRequested, this, &XcpPanel::readMotorBack);
+    connect(m_motorView, &MotorView::logMessage, this, [this](const QString &t) { m_log->appendPlainText(t); });
+    connect(this, &XcpPanel::motorCharsRead, m_motorView, &MotorView::onCharsRead);
+    m_motorSpReadTimer = new QTimer(this);
+    m_motorSpReadTimer->setSingleShot(true);
+    m_motorSpReadTimer->setInterval(200);
+    connect(m_motorSpReadTimer, &QTimer::timeout, this, &XcpPanel::readMotorBack);
     return m_motorView;
 }
 
@@ -1405,6 +1413,22 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
         m_positionView->feedSample(m);
     if (m_motorView)
         m_motorView->feedSample(m);
+    if (m_disarmPending) {
+        for (const A2lMeas &me : m_meas) {
+            if (me.name != QLatin1String("EscMotorState"))
+                continue;
+            double st = 0.0;
+            if (A2lModel::decodeFrom(m.blockBase, m.blockRaw, me, &st) && (int(st) == 0 || int(st) == 3)) {
+                m_log->appendPlainText(QString("[Motors] %1 after %2 ms")
+                                           .arg(motorStateName(int(st)))
+                                           .arg(m_disarmClock.elapsed()));
+                m_disarmPending = false;
+            }
+            break;
+        }
+        if (m_disarmPending && m_disarmClock.elapsed() > 10000)
+            m_disarmPending = false;
+    }
 
     if (m_logging) {
         QVector<double> values;
@@ -1773,6 +1797,9 @@ void XcpPanel::onMemoryRead(quint32 address, const QByteArray &data)
         return;
     }
 
+    if (handleMotorRead(address, data))
+        return;
+
     // A2L characteristic block read-back: fill any row whose value lies
     // inside the returned window (cal floats and GPIO bytes alike).
     populateCharsFromRead(address, data);
@@ -1780,7 +1807,7 @@ void XcpPanel::onMemoryRead(quint32 address, const QByteArray &data)
 
 // Populate value cells for every characteristic contained in [base, base+len).
 // Returns true if at least one cell was updated.
-bool XcpPanel::populateCharsFromRead(quint32 base, const QByteArray &data)
+bool XcpPanel::populateCharsFromRead(quint32 base, const QByteArray &data, bool quiet)
 {
     bool any = false;
     for (int i = 0; i < m_chars.size(); ++i) {
@@ -1795,7 +1822,7 @@ bool XcpPanel::populateCharsFromRead(quint32 base, const QByteArray &data)
             m_calTable->item(i, 3)->setText(formatCharValue(c, p));
         any = true;
     }
-    if (any)
+    if (any && !quiet)
         m_log->appendPlainText("[Calibration/GPIO values read]");
     return any;
 }
@@ -1842,7 +1869,7 @@ void XcpPanel::writeCalRow(int row)
 // like a Calibration tab row. onMemoryWritten()/onError() then take over
 // logging and the confirming read-back, same as any other characteristic
 // write.
-void XcpPanel::writeCharByName(const QString &name, quint32 value)
+void XcpPanel::writeCharByName(const QString &name, quint32 value, XcpClient::WriteMode mode)
 {
     for (const A2lChar &c : m_chars) {
         if (c.name != name)
@@ -1853,7 +1880,7 @@ void XcpPanel::writeCharByName(const QString &name, quint32 value)
             m_log->appendPlainText(QString("[Invalid value for %1 - aborted]").arg(name));
             return;
         }
-        m_client->writeMemory(c.addr, bytes);
+        m_client->writeMemory(c.addr, bytes, mode);
         return;
     }
     m_log->appendPlainText(QString("[%1 not in loaded A2L - write aborted]").arg(name));
@@ -1877,7 +1904,11 @@ void XcpPanel::writeMotorChar(const QString &name, quint32 value)
         m_log->appendPlainText(QString("[Motors: refused %1 = %2 (DShot 1..47 are commands)]").arg(name).arg(value));
         return;
     }
-    writeCharByName(name, value);
+    // A setpoint still waiting in the queue is replaced, not followed by
+    // another write: a slider drag can never build a backlog.
+    writeCharByName(name, value,
+                    name.startsWith(QLatin1String("CAL_motorManualSp_"))
+                        ? XcpClient::WriteMode::Coalesce : XcpClient::WriteMode::Normal);
 }
 
 void XcpPanel::armMotors()
@@ -1885,9 +1916,82 @@ void XcpPanel::armMotors()
     writeCharByName("CAL_motorCmd", 1);
 }
 
+// Addresses of CAL_motorManualSp_M1..4, resolved by name.
+QSet<quint32> XcpPanel::motorSetpointAddrs() const
+{
+    QSet<quint32> addrs;
+    for (const A2lChar &c : m_chars)
+        if (c.name.startsWith(QLatin1String("CAL_motorManualSp_")))
+            addrs.insert(c.addr);
+    return addrs;
+}
+
+// Kill path: queued setpoint writes are dropped and CAL_motorCmd=0 goes to the
+// head of the XCP queue (behind only the request already in flight). Also
+// used by the footer's DISARM button.
 void XcpPanel::disarmMotors()
 {
-    writeCharByName("CAL_motorCmd", 0);
+    m_client->purgeWrites(motorSetpointAddrs());
+    m_disarmClock.start();
+    m_disarmPending = m_client->isConnected();
+    m_log->appendPlainText(QString("[Motors] DISARM sent, t=%1 ms").arg(m_timeBase.elapsed()));
+    writeCharByName("CAL_motorCmd", 0, XcpClient::WriteMode::Priority);
+}
+
+void XcpPanel::stopAllMotors()
+{
+    m_client->purgeWrites(motorSetpointAddrs());
+    m_log->appendPlainText(QString("[Motors] STOP ALL sent, t=%1 ms").arg(m_timeBase.elapsed()));
+    for (const A2lChar &c : m_chars)
+        if (c.name.startsWith(QLatin1String("CAL_motorManualSp_")))
+            writeCharByName(c.name, 0, XcpClient::WriteMode::Priority);
+}
+
+// One SHORT_UPLOAD over CAL_motorCmd .. CAL_motorManualSp_M4 (a contiguous
+// 16-byte range in the current A2L; span computed from the A2L, not assumed).
+// The reply is parsed in onMemoryRead() and handed to the Motors tab by name.
+void XcpPanel::readMotorBack()
+{
+    if (!m_client->isConnected() || m_chars.isEmpty())
+        return;
+    if (m_motorReadClock.isValid() && m_motorReadClock.elapsed() < 120)
+        return;                 // an identical read is already on its way
+    quint32 lo = 0xFFFFFFFFu, hi = 0;
+    for (const A2lChar &c : m_chars) {
+        if (!c.name.startsWith(QLatin1String("CAL_motor")))
+            continue;
+        lo = qMin(lo, c.addr);
+        hi = qMax(hi, c.addr + quint32(a2lTypeSize(c.type)));
+    }
+    if (hi <= lo || hi - lo > 63u)
+        return;
+    m_motorReadClock.restart();
+    m_motorReadLo = lo;
+    m_motorReadLen = int(hi - lo);
+    m_client->readMemory(lo, quint8(m_motorReadLen));
+}
+
+bool XcpPanel::handleMotorRead(quint32 address, const QByteArray &data)
+{
+    if (address != m_motorReadLo || data.size() != m_motorReadLen)
+        return false;
+    QMap<QString, quint32> values;
+    for (const A2lChar &c : m_chars) {
+        if (!c.name.startsWith(QLatin1String("CAL_motor")) || c.addr < address)
+            continue;
+        const int off = int(c.addr - address);
+        const int sz = a2lTypeSize(c.type);
+        if (off + sz > data.size())
+            continue;
+        const uchar *p = reinterpret_cast<const uchar *>(data.constData()) + off;
+        if (sz == 2)
+            values.insert(c.name, qFromLittleEndian<quint16>(p));
+        else if (sz == 4)
+            values.insert(c.name, qFromLittleEndian<quint32>(p));
+    }
+    populateCharsFromRead(address, data, /*quiet=*/true);   // keep the Calibration rows current
+    emit motorCharsRead(values);
+    return true;
 }
 
 void XcpPanel::exportCalibration()
@@ -1975,8 +2079,17 @@ void XcpPanel::onMemoryWritten(quint32 address)
 
     for (const A2lChar &c : m_chars) {
         if (address == c.addr) {
+            if (c.name.startsWith(QLatin1String("CAL_motorManualSp_"))) {
+                // Setpoint stream: no per-write log, no full readCalibration();
+                // one read-back of the motor words once the burst has settled.
+                m_motorSpReadTimer->start();
+                return;
+            }
             m_log->appendPlainText(QString("[%1 written]").arg(c.name));
-            readCalibration();      // read back for confirmation
+            if (c.name.startsWith(QLatin1String("CAL_motor")))
+                readMotorBack();    // cmd / manual: cheap, targeted read-back
+            else
+                readCalibration();  // read back for confirmation
             return;
         }
     }
@@ -2054,6 +2167,8 @@ void XcpPanel::setConnectedState(bool connected)
         m_positionView->setConnected(connected);
     if (m_motorView)
         m_motorView->setConnected(connected);
+    if (!connected)
+        m_disarmPending = false;
 
     m_connectBtn->setText(connected ? "Disconnect" : "Connect");
     m_hostEdit->setEnabled(!connected);

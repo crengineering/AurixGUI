@@ -1,4 +1,5 @@
 #include "systemfooter.h"
+#include "motormath.h"
 #include "appicon.h"
 #include "lampicon.h"
 
@@ -53,17 +54,6 @@ int indexOfChar(const QVector<A2lChar> &chars, const char *name)
         if (chars[i].name == QLatin1String(name))
             return i;
     return -1;
-}
-
-QString escMotorStateText(int state)
-{
-    switch (state) {
-    case 0: return QStringLiteral("DISARMED");
-    case 1: return QStringLiteral("INIT");
-    case 2: return QStringLiteral("ARMED");
-    case 3: return QStringLiteral("FAILSAFE");
-    default: return QStringLiteral("--");
-    }
 }
 
 QFrame *makeSeparator()
@@ -457,7 +447,7 @@ void SystemFooter::update(const XcpClient::Measurements &m)
     if (m_idxEscState >= 0) {
         double v = 0.0;
         if (A2lModel::decodeFrom(m.blockBase, m.blockRaw, m_meas[m_idxEscState], &v))
-            m_actuatorStateVal->setText(escMotorStateText(int(v)));
+            m_actuatorStateVal->setText(motorStateName(int(v)));
         else
             m_actuatorStateVal->setText("--");
     } else {

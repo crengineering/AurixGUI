@@ -15,6 +15,9 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QWheelEvent>
+#include <QKeyEvent>
+#include <QFocusEvent>
+#include <QLineEdit>
 #include <QFont>
 #include <cmath>
 
@@ -53,6 +56,18 @@ public:
     using QSlider::QSlider;
 protected:
     void wheelEvent(QWheelEvent *e) override { e->ignore(); }
+    // Only the four arrow keys (single step 1). Home/End/PageUp/PageDown would
+    // jump the throttle (with "Link all four" on all motors) -- swallowed.
+    void keyPressEvent(QKeyEvent *e) override
+    {
+        switch (e->key()) {
+        case Qt::Key_Up: case Qt::Key_Down: case Qt::Key_Left: case Qt::Key_Right:
+            QSlider::keyPressEvent(e);
+            break;
+        default:
+            e->accept();
+        }
+    }
 };
 
 class NoWheelSpinBox : public QSpinBox
@@ -61,6 +76,26 @@ public:
     using QSpinBox::QSpinBox;
 protected:
     void wheelEvent(QWheelEvent *e) override { e->ignore(); }
+    void keyPressEvent(QKeyEvent *e) override
+    {
+        if (e->key() == Qt::Key_PageUp || e->key() == Qt::Key_PageDown) {
+            e->accept();                 // no big jumps
+            return;
+        }
+        QSpinBox::keyPressEvent(e);
+    }
+    // A typed value commits ONLY on Enter/Return. On focus-out the text is
+    // reverted to the current value first, so the base class has nothing new
+    // to interpret and no write is produced.
+    void focusOutEvent(QFocusEvent *e) override
+    {
+        const int v = value();
+        const QString t = (v == minimum() && !specialValueText().isEmpty())
+                              ? specialValueText()
+                              : prefix() + textFromValue(v) + suffix();
+        lineEdit()->setText(t);
+        QSpinBox::focusOutEvent(e);
+    }
 };
 
 } // namespace
@@ -158,7 +193,6 @@ MotorView::MotorView(QWidget *parent)
 
     // ---- second row: manual toggle, link all four, hint ---------------
     m_manualBtn = new QPushButton(tr("Manual throttle: OFF"));
-    m_manualBtn->setCheckable(true);
     m_manualBtn->setMinimumHeight(30);
     m_manualBtn->setToolTip(tr("CAL_motorManual: ON = setpoints come from the sliders instead of the flight controller. "
                                "Only available while ARMED; the firmware clears it on every exit from ARMED."));
@@ -302,16 +336,21 @@ MotorView::MotorView(QWidget *parent)
     // ---- wiring -----------------------------------------------------------
     connect(m_armBtn,     &QPushButton::clicked, this, &MotorView::onArmClicked);
     connect(m_disarmBtn,  &QPushButton::clicked, this, [this]() {
-        // No confirmation: kill button. Drop pending slider writes first, and
-        // reset the GUI side; the firmware zeroes its own copies.
+        // No confirmation: kill button. Drop pending slider writes and lock
+        // the sliders; the reset to STOP/OFF happens on the CONFIRMED exit
+        // from ARMED (EscMotorState), not on the click.
         m_flushTimer.stop();
         for (int &p : m_pending) p = -1;
+        m_pendingOp = Pending::None;
+        m_pendTimer.stop();
+        m_locked = true;
+        m_lockTimer.start();
         emit disarmRequested();
-        resetManualUi();
         updateControls();
+        updateBanner();
     });
     connect(m_stopAllBtn, &QPushButton::clicked, this, &MotorView::onStopAll);
-    connect(m_manualBtn,  &QPushButton::clicked, this, &MotorView::onManualClicked);
+    connect(m_manualBtn,  &QPushButton::clicked, this, [this]() { onManualClicked(m_manual != Manual::On); });
 
     m_flushTimer.setSingleShot(true);
     m_flushTimer.setInterval(50);
@@ -319,6 +358,17 @@ MotorView::MotorView(QWidget *parent)
     m_staleTimer.setInterval(500);
     connect(&m_staleTimer, &QTimer::timeout, this, &MotorView::checkStale);
     m_staleTimer.start();
+    m_pollTimer.setInterval(1000);
+    connect(&m_pollTimer, &QTimer::timeout, this, [this]() {
+        if (m_connected && m_state == 2 && !isStale() && m_charsOk)
+            emit readBackRequested();
+    });
+    m_pollTimer.start();
+    m_pendTimer.setSingleShot(true);
+    connect(&m_pendTimer, &QTimer::timeout, this, &MotorView::pendingTimeout);
+    m_lockTimer.setSingleShot(true);
+    m_lockTimer.setInterval(3000);
+    connect(&m_lockTimer, &QTimer::timeout, this, [this]() { m_locked = false; updateControls(); updateBanner(); });
 
     showReadoutsStale();
     updateControls();
@@ -350,11 +400,10 @@ void MotorView::setAvailable(const QVector<A2lMeas> &meas)
         x.cur       = indexOfMeas(meas, p + "CurrentCa");
         x.mah       = indexOfMeas(meas, p + "Mah");
     }
-    // New A2L: nothing from the old one may carry over.
-    m_haveSample = false;
-    m_state = -1;
-    resetManualUi();
-    showReadoutsStale();
+    // A2L reload: only re-resolve the indices. The firmware has NOT zeroed
+    // anything, so manual/sliders/state keep their values and the next sample
+    // and read-back refresh them (a reset here would show OFF/STOP while the
+    // motors keep spinning).
     updateControls();
     updateBanner();
 }
@@ -374,10 +423,11 @@ void MotorView::setCharsAvailable(const QVector<A2lChar> &chars)
     m_charsOk = ok;
     m_spMax = spMax;
     for (int i = 0; i < kMotors; ++i) {
+        // setMaximum may clamp the value; that must never look like a user move.
+        const QSignalBlocker b1(m_ui[i].slider), b2(m_ui[i].spin);
         m_ui[i].slider->setMaximum(m_spMax);
         m_ui[i].spin->setMaximum(m_spMax);
     }
-    resetManualUi();
     updateControls();
     updateBanner();
 }
@@ -395,6 +445,8 @@ void MotorView::setConnected(bool connected)
         // Link gone: firmware goes FAILSAFE and zeroes its side; we just reset ours.
         resetManualUi();
         showReadoutsStale();
+    } else {
+        m_manual = Manual::Unknown;   // until a read-back says otherwise
     }
     updateControls();
     updateBanner();
@@ -408,9 +460,14 @@ bool MotorView::isStale() const
 void MotorView::checkStale()
 {
     if (m_connected && m_haveSample && m_sinceSample.elapsed() > kStaleMs) {
-        // Do not keep trusting "ARMED" nor show frozen numbers as live.
-        m_state = -1;
-        resetManualUi();
+        // Grey everything and disable the sliders; state shows STALE and the
+        // manual toggle "unknown". Nothing is reset to OFF/STOP -- we do not
+        // know that the firmware did. DISARM / STOP ALL stay enabled.
+        m_flushTimer.stop();
+        for (int &p : m_pending) p = -1;
+        m_pendingOp = Pending::None;
+        m_pendTimer.stop();
+        m_manual = Manual::Unknown;
         showReadoutsStale();
         updateControls();
         updateBanner();
@@ -435,14 +492,22 @@ void MotorView::feedSample(const XcpClient::Measurements &m)
             return;   // Esc block not covered yet (first sample); keep waiting
         newState = int(sv);
     }
+    const int prevState = m_state;
     m_haveSample = true;
     m_sinceSample.restart();
     m_state = newState;
 
-    // Never fight the firmware: anything but ARMED means it already zeroed
-    // manual + setpoints, so mirror that without writing.
-    if (m_state != 2)
+    // Never fight the firmware: a CONFIRMED exit from ARMED (state read as
+    // DISARMED/INIT/FAILSAFE) means it already zeroed manual + setpoints, so
+    // mirror that without writing. An unknown state (-1, no EscMotorState in
+    // the A2L) is not an exit.
+    if (m_state == 0 || m_state == 1 || m_state == 3) {
         resetManualUi();
+        m_locked = false;
+        m_lockTimer.stop();
+    } else if (m_state == 2 && (prevState != 2 || m_manual == Manual::Unknown) && m_charsOk) {
+        emit readBackRequested();   // learn CAL_motorManual / Sp now, not in up to 1 s
+    }
 
     for (int i = 0; i < kMotors; ++i) {
         const MotorIdx &x = m_idx[i];
@@ -553,6 +618,12 @@ bool MotorView::manualWritable() const
     return m_connected && m_charsOk && !isStale() && m_state == 2;
 }
 
+bool MotorView::slidersEnabled() const
+{
+    return manualWritable() && m_manual == Manual::On
+        && m_pendingOp == Pending::None && !m_locked;
+}
+
 QString MotorView::disabledReason() const
 {
     if (!m_connected)
@@ -560,22 +631,32 @@ QString MotorView::disabledReason() const
     if (!m_charsOk || m_idxState < 0)
         return tr("Not in this A2L (needs EscMotorState and CAL_motorCmd / CAL_motorManual / CAL_motorManualSp_M1..4).");
     if (isStale())
-        return tr("Waiting for ESC data (no sample in the last 1.5 s).");
+        return tr("STALE: no ESC sample in the last 1.5 s - manual state unknown, sliders off. DISARM / STOP ALL still work.");
     if (m_state != 2)
         return tr("Arm first (state is %1).").arg(motorStateName(m_state));
-    if (!m_manual)
+    if (m_locked)
+        return tr("DISARM sent - waiting for the controller to confirm.");
+    if (m_pendingOp == Pending::AwaitZeros)
+        return tr("Manual throttle: zeroing the setpoints (waiting for read-back)...");
+    if (m_pendingOp == Pending::AwaitOn)
+        return tr("Manual throttle: waiting for CAL_motorManual = 1 to be confirmed by read-back...");
+    if (m_pendingOp == Pending::AwaitOff)
+        return tr("Manual throttle: waiting for CAL_motorManual = 0 to be confirmed by read-back...");
+    if (m_manual == Manual::Unknown)
+        return tr("Manual throttle state not read back yet.");
+    if (m_manual == Manual::Off)
         return tr("Enable manual throttle first.");
     return QString();
 }
 
 void MotorView::updateControls()
 {
-    m_armBtn->setEnabled(m_connected && m_cmdOk && (m_state == 0 || m_state == -1 || m_state == 3));
+    m_armBtn->setEnabled(m_connected && m_cmdOk && !isStale() && (m_state == 0 || m_state == 3));
     m_disarmBtn->setEnabled(m_connected && m_cmdOk);
     m_stopAllBtn->setEnabled(m_connected && m_charsOk);
-    m_manualBtn->setEnabled(manualWritable());
+    m_manualBtn->setEnabled(manualWritable() && m_pendingOp == Pending::None && !m_locked);
 
-    const bool sliders = manualWritable() && m_manual;
+    const bool sliders = slidersEnabled();
     m_linkAll->setEnabled(sliders);
     for (int i = 0; i < kMotors; ++i) {
         m_ui[i].slider->setEnabled(sliders);
@@ -585,16 +666,20 @@ void MotorView::updateControls()
     }
 
     const QString why = disabledReason();
-    m_hintLbl->setText(why.isEmpty()
-                           ? tr("Manual throttle active: sliders write CAL_motorManualSp_Mn (0 = stop, 48..%1).").arg(m_spMax)
-                           : why);
-    m_hintLbl->setStyleSheet(why.isEmpty() ? QString() : QStringLiteral("QLabel { color: %1; }").arg(kColGrey.name()));
-    const QString tip = why;
+    QString text = why.isEmpty()
+        ? tr("Manual throttle active: sliders write CAL_motorManualSp_Mn (0 = stop, 48..%1).").arg(m_spMax)
+        : why;
+    if (!m_notice.isEmpty())
+        text = m_notice + QStringLiteral("  ") + text;
+    m_hintLbl->setText(text);
+    m_hintLbl->setStyleSheet(!m_notice.isEmpty() ? QStringLiteral("QLabel { color: %1; font-weight: bold; }").arg(kColRed.name())
+                             : why.isEmpty() ? QString()
+                                             : QStringLiteral("QLabel { color: %1; }").arg(kColGrey.name()));
     for (int i = 0; i < kMotors; ++i) {
-        m_ui[i].slider->setToolTip(tip);
-        m_ui[i].spin->setToolTip(tip);
+        m_ui[i].slider->setToolTip(why);
+        m_ui[i].spin->setToolTip(why);
     }
-    m_linkAll->setToolTip(sliders ? tr("Moving one slider moves all four motors.") : tip);
+    m_linkAll->setToolTip(sliders ? tr("Moving one slider moves all four motors.") : why);
 }
 
 void MotorView::updateBanner()
@@ -618,6 +703,8 @@ void MotorView::updateBanner()
     } else if (isStale()) {
         link = tr("STALE - no data for >1.5 s");
         linkCol = QColor(224, 160, 0);
+        text = QStringLiteral("STALE");
+        c = kColAmber;
     } else {
         link = tr("Live");
         linkCol = LampColor::Green;
@@ -635,9 +722,23 @@ void MotorView::updateBanner()
     m_linkLamp->setPixmap(bulbPixmap(linkCol, true));
     m_linkLbl->setText(link);
 
-    m_manualBtn->setText(m_manual ? tr("Manual throttle: ON") : tr("Manual throttle: OFF"));
-    m_manualBtn->setChecked(m_manual);
-    m_manualBtn->setStyleSheet(m_manual ? QStringLiteral("QPushButton { background: #e0a000; font-weight: bold; }") : QString());
+    // The toggle shows what the firmware read back -- never our own request.
+    QString mtext;
+    QString mstyle;
+    if (m_pendingOp != Pending::None) {
+        mtext = tr("Manual throttle: pending...");
+        mstyle = QStringLiteral("QPushButton { background: #f3e2a0; font-style: italic; }");
+    } else if (isStale() || m_manual == Manual::Unknown) {
+        mtext = tr("Manual throttle: unknown");
+        mstyle = QStringLiteral("QPushButton { color: %1; font-style: italic; }").arg(kColGrey.name());
+    } else if (m_manual == Manual::On) {
+        mtext = tr("Manual throttle: ON");
+        mstyle = QStringLiteral("QPushButton { background: #e0a000; font-weight: bold; }");
+    } else {
+        mtext = tr("Manual throttle: OFF");
+    }
+    m_manualBtn->setText(mtext);
+    m_manualBtn->setStyleSheet(mstyle);
 }
 
 void MotorView::setSliderSilently(int motor, int pos)
@@ -650,22 +751,20 @@ void MotorView::setSliderSilently(int motor, int pos)
 }
 
 // GUI-only reset: sliders to STOP, manual off, pending writes dropped. Never
-// writes -- called when the firmware has already zeroed its side (or the link
-// is gone, so a write could not happen anyway).
+// writes. Only for a CONFIRMED exit from ARMED (the firmware has zeroed its
+// side) or a dropped link (a write could not happen anyway).
 void MotorView::resetManualUi()
 {
     m_flushTimer.stop();
     for (int &p : m_pending) p = -1;
-    m_manual = false;
+    m_manual = Manual::Off;
+    m_pendingOp = Pending::None;
+    m_pendTimer.stop();
+    m_notice.clear();
     for (int i = 0; i < kMotors; ++i)
         setSliderSilently(i, kMotorSliderStop);
     if (m_linkAll)
         m_linkAll->setChecked(false);
-    if (m_manualBtn) {
-        m_manualBtn->setChecked(false);
-        m_manualBtn->setText(tr("Manual throttle: OFF"));
-        m_manualBtn->setStyleSheet(QString());
-    }
     for (int i = 0; i < kMotors; ++i)
         m_ui[i].bar->setMarker(0.0, false);
 }
@@ -687,22 +786,139 @@ void MotorView::writeAllStop()
         emit writeCharRequested(spName(i), 0);
 }
 
+// Operator asked for manual ON/OFF. Nothing is believed until the firmware
+// reads it back:
+//   ON : Sp=0 x4, read back, only if all four read 0 -> CAL_motorManual=1,
+//        read back, only if it reads 1 -> sliders live.
+//   OFF: Sp=0 x4, CAL_motorManual=0, read back must show 0.
 void MotorView::onManualClicked(bool on)
 {
-    if (!manualWritable()) {
-        // Raced with a state change: undo the click, write nothing.
-        updateBanner();
+    if (!manualWritable() || m_pendingOp != Pending::None || m_locked) {
+        updateBanner();   // raced with a state change: write nothing
         return;
     }
     m_flushTimer.stop();
     for (int &p : m_pending) p = -1;
     for (int i = 0; i < kMotors; ++i)
         setSliderSilently(i, kMotorSliderStop);
-    // Setpoints are zeroed first in BOTH directions so stale values can never
-    // reach the motors when the source flips (writes are FIFO on the XCP queue).
+    m_notice.clear();
     writeAllStop();
-    emit writeCharRequested(QStringLiteral("CAL_motorManual"), on ? 1u : 0u);
-    m_manual = on;
+    if (on) {
+        m_pendingOp = Pending::AwaitZeros;
+        m_pendTimer.start(1000);
+    } else {
+        emit writeCharRequested(QStringLiteral("CAL_motorManual"), 0u);
+        m_pendingOp = Pending::AwaitOff;
+        m_pendTimer.start(1500);
+    }
+    emit readBackRequested();
+    updateBanner();
+    updateControls();
+}
+
+void MotorView::abortPending(const QString &why)
+{
+    const Pending was = m_pendingOp;
+    m_pendingOp = Pending::None;
+    m_pendTimer.stop();
+    m_notice = why;
+    emit logMessage(QStringLiteral("[Motors] ") + why);
+    // After a failed ON nothing was written for manual (still Off as before);
+    // after a failed ON/OFF confirmation the firmware state is unknown until
+    // the next read-back.
+    if (was != Pending::AwaitZeros)
+        m_manual = Manual::Unknown;
+    emit readBackRequested();
+    updateBanner();
+    updateControls();
+}
+
+void MotorView::pendingTimeout()
+{
+    switch (m_pendingOp) {
+    case Pending::AwaitZeros:
+        abortPending(tr("Manual ON aborted: the setpoint read-back did not show four zeros within 1 s; CAL_motorManual=1 was NOT written."));
+        break;
+    case Pending::AwaitOn:
+        abortPending(tr("CAL_motorManual=1 was not confirmed by read-back within 1.5 s (write failed?) - manual throttle not enabled."));
+        break;
+    case Pending::AwaitOff:
+        abortPending(tr("CAL_motorManual=0 was not confirmed by read-back within 1.5 s - manual state unknown."));
+        break;
+    case Pending::None:
+        break;
+    }
+}
+
+void MotorView::onCharsRead(const QMap<QString, quint32> &v)
+{
+    if (!m_connected || m_state != 2 || !v.contains(QStringLiteral("CAL_motorManual")))
+        return;
+    const bool man = v.value(QStringLiteral("CAL_motorManual")) == 1u;
+    bool spZero = true;
+    for (int i = 0; i < kMotors; ++i)
+        spZero = spZero && v.contains(spName(i)) && v.value(spName(i)) == 0u;
+
+    switch (m_pendingOp) {
+    case Pending::AwaitZeros:
+        if (spZero) {
+            m_pendingOp = Pending::AwaitOn;
+            m_pendTimer.start(1500);
+            emit writeCharRequested(QStringLiteral("CAL_motorManual"), 1u);
+            emit readBackRequested();
+        } else {
+            QTimer::singleShot(150, this, [this]() {
+                if (m_pendingOp == Pending::AwaitZeros)
+                    emit readBackRequested();
+            });
+        }
+        break;
+    case Pending::AwaitOn:
+        // A read issued before our write landed shows 0 -- only the timeout aborts.
+        if (man) {
+            m_pendingOp = Pending::None;
+            m_pendTimer.stop();
+            m_manual = Manual::On;
+        } else {
+            QTimer::singleShot(150, this, [this]() {
+                if (m_pendingOp == Pending::AwaitOn)
+                    emit readBackRequested();
+            });
+        }
+        break;
+    case Pending::AwaitOff:
+        if (!man) {
+            m_pendingOp = Pending::None;
+            m_pendTimer.stop();
+            m_manual = Manual::Off;
+        } else {
+            QTimer::singleShot(150, this, [this]() {
+                if (m_pendingOp == Pending::AwaitOff)
+                    emit readBackRequested();
+            });
+        }
+        break;
+    case Pending::None:
+        if (man && m_manual != Manual::On) {
+            // Enabled (or still enabled) in the firmware: adopt its setpoints.
+            m_manual = Manual::On;
+            m_notice.clear();
+            for (int i = 0; i < kMotors; ++i)
+                if (v.contains(spName(i)))
+                    setSliderSilently(i, motorDshotToSlider(int(v.value(spName(i))), m_spMax));
+        } else if (!man && m_manual != Manual::Off) {
+            if (m_manual == Manual::On) {
+                m_notice = tr("Manual throttle was switched off outside this tab (CAL_motorManual reads 0) - following the firmware.");
+                emit logMessage(QStringLiteral("[Motors] CAL_motorManual read back 0 while the GUI showed ON - following the firmware"));
+            }
+            m_manual = Manual::Off;
+            m_flushTimer.stop();
+            for (int &p : m_pending) p = -1;
+            for (int i = 0; i < kMotors; ++i)
+                setSliderSilently(i, kMotorSliderStop);
+        }
+        break;
+    }
     updateBanner();
     updateControls();
 }
@@ -714,7 +930,7 @@ void MotorView::onStopAll()
     for (int i = 0; i < kMotors; ++i)
         setSliderSilently(i, kMotorSliderStop);
     if (m_connected && m_charsOk)
-        writeAllStop();
+        emit stopAllRequested();   // XcpPanel: purge queued setpoints, priority Sp=0 x4
     updateControls();
 }
 
@@ -741,15 +957,15 @@ void MotorView::onSliderChanged(int motor, int pos)
 
 void MotorView::onSpinChanged(int motor, int pos)
 {
-    // Commit from the spinbox: route through the slider so link-all, pending
-    // coalescing and the marker all follow one path.
+    // Commit from the spinbox (Enter / arrows): route through the slider so
+    // link-all, pending coalescing and the marker all follow one path.
     m_ui[motor].slider->setValue(pos);
 }
 
 void MotorView::flushPending()
 {
     // The writes only happen while everything is in order; otherwise drop.
-    const bool ok = manualWritable() && m_manual;
+    const bool ok = slidersEnabled();
     for (int i = 0; i < kMotors; ++i) {
         if (m_pending[i] < 0)
             continue;

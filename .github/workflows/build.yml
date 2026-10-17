@@ -57,6 +57,13 @@ jobs:
         shell: cmd
         run: build\Release\motor_selfcheck.exe
 
+      - name: Build Motors tab safety self-check (offscreen)
+        run: cmake --build build --config Release --target motor_view_selfcheck
+
+      - name: Run Motors tab safety self-check
+        shell: cmd
+        run: build\Release\motor_view_selfcheck.exe
+
       - name: Deploy Qt DLLs
         run: windeployqt --release build/Release/SerialMonitor.exe
 

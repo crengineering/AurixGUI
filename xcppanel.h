@@ -3,6 +3,8 @@
 
 #include <QWidget>
 #include <QElapsedTimer>
+#include <QMap>
+#include <QSet>
 #include <QVector>
 #include "xcpclient.h"
 #include "mf4writer.h"
@@ -43,6 +45,8 @@ public slots:
     // same onMemoryWritten()/onError() every Calibration tab write uses.
     void armMotors();
     void disarmMotors();
+    void stopAllMotors();
+    void readMotorBack();
     // Driven by the Motors tab (CAL_motor* writes only; see .cpp).
     void writeMotorChar(const QString &name, quint32 value);
 
@@ -50,6 +54,7 @@ signals:
     void connectionChanged(bool connected);   // drives the tab lamp icon
     void measurementsUpdated(const XcpClient::Measurements &m);  // -> SystemFooter
     void a2lLoaded(const QVector<A2lMeas> &meas);  // -> SystemFooter (Actuators lamps)
+    void motorCharsRead(const QMap<QString, quint32> &values);  // -> Motors tab (read-back, by name)
     void a2lCharsLoaded(const QVector<A2lChar> &chars);  // -> SystemFooter (ARM/DISARM)
 
 private slots:
@@ -156,7 +161,10 @@ private:
     // writeCalRow() (kept as-is, it writes the row's edited text) and
     // armMotors()/disarmMotors(), which write a fixed value instead of a
     // table cell. Logs and aborts if the A2L does not describe the name.
-    void            writeCharByName(const QString &name, quint32 value);
+    void            writeCharByName(const QString &name, quint32 value,
+                                    XcpClient::WriteMode mode = XcpClient::WriteMode::Normal);
+    QSet<quint32>   motorSetpointAddrs() const;
+    bool            handleMotorRead(quint32 address, const QByteArray &data);
     void            loadA2l(const QString &path, bool remember);
     QWidget        *buildSensorsTab();
     void            rebuildDiagTable();
@@ -176,7 +184,7 @@ private:
     void            rebuildSensorsTab();
     void            updateSensorValues(const XcpClient::Measurements &m);
     void            rebuildCalTable();
-    bool            populateCharsFromRead(quint32 base, const QByteArray &data);
+    bool            populateCharsFromRead(quint32 base, const QByteArray &data, bool quiet = false);
     QString         defaultA2lPath() const;
     QVector<A2lChar> m_chars;
     QString         m_a2lPath;
@@ -235,6 +243,12 @@ private:
     QVector<PlotPane *>  m_plotPanes;
     AttitudeView        *m_attitudeView = nullptr;   // "Attitude" sub-tab (SYS1-015)
     MotorView           *m_motorView    = nullptr;   // "Motors" sub-tab
+    QTimer              *m_motorSpReadTimer = nullptr;   // 200 ms after the last Sp write
+    QElapsedTimer        m_motorReadClock;
+    quint32              m_motorReadLo  = 0;
+    int                  m_motorReadLen = 0;
+    QElapsedTimer        m_disarmClock;                  // kill-latency evidence
+    bool                 m_disarmPending = false;
     PositionView        *m_positionView = nullptr;   // right half of "Attitude" tab (SYS1-016)
     QWidget             *m_plotGridHost = nullptr;
     QGridLayout         *m_plotGrid     = nullptr;

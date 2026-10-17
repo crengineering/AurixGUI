@@ -154,3 +154,18 @@ add_executable(motor_selfcheck EXCLUDE_FROM_ALL
 target_include_directories(motor_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(motor_selfcheck PRIVATE Qt6::Core)
 add_test(NAME motor_selfcheck COMMAND motor_selfcheck)
+
+# Widget-level safety self-check of the Motors tab: MotorView on the offscreen
+# platform with a synthetic A2L and synthetic read-backs (no XCP, no board).
+# Links motorview.cpp + a2lmodel.cpp, not xcppanel.cpp.
+add_executable(motor_view_selfcheck EXCLUDE_FROM_ALL
+    tools/motor_view_selfcheck_main.cpp
+    motorview.cpp
+    motorview.h
+    motormath.h
+    a2lmodel.cpp
+    a2lmodel.h
+)
+target_include_directories(motor_view_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(motor_view_selfcheck PRIVATE Qt6::Widgets Qt6::Network)
+add_test(NAME motor_view_selfcheck COMMAND motor_view_selfcheck)

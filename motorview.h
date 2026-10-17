@@ -4,6 +4,7 @@
 #include <QWidget>
 #include <QVector>
 #include <QString>
+#include <QMap>
 #include <QElapsedTimer>
 #include <QTimer>
 #include "a2lmodel.h"
@@ -43,11 +44,18 @@ public:
 public slots:
     void setConnected(bool connected);
     void feedSample(const XcpClient::Measurements &m);
+    // Read-back of CAL_motorCmd / CAL_motorManual / CAL_motorManualSp_M1..4
+    // from XcpPanel, keyed by characteristic NAME. This (plus EscMotorState)
+    // is the only source for the manual toggle and the slider enable state.
+    void onCharsRead(const QMap<QString, quint32> &values);
 
 signals:
     void armRequested();
-    void disarmRequested();
-    void writeCharRequested(const QString &name, quint32 value);
+    void disarmRequested();                 // XcpPanel: purge Sp writes, priority CAL_motorCmd=0
+    void stopAllRequested();                // XcpPanel: purge Sp writes, priority Sp=0 x4
+    void writeCharRequested(const QString &name, quint32 value);   // setpoint writes are queue-coalesced
+    void readBackRequested();               // ask XcpPanel for a CAL_motor* read-back
+    void logMessage(const QString &text);
 
 private:
     static constexpr int kMotors = 4;
@@ -69,6 +77,9 @@ private:
         QSpinBox  *spin = nullptr;
     };
 
+    enum class Manual { Unknown, Off, On };                 // as read back from the firmware
+    enum class Pending { None, AwaitZeros, AwaitOn, AwaitOff };   // operator request in flight
+
     void onSliderChanged(int motor, int pos);
     void onSpinChanged(int motor, int pos);
     void onArmClicked();
@@ -82,6 +93,9 @@ private:
     void updateBanner();
     void showReadoutsStale();
     void checkStale();
+    void pendingTimeout();
+    void abortPending(const QString &why);
+    bool slidersEnabled() const;
     bool isStale() const;
     bool manualWritable() const;
     QString disabledReason() const;
@@ -104,12 +118,18 @@ private:
     bool m_connected  = false;
     bool m_haveSample = false;
     int  m_state      = -1;      // EscMotorState, -1 unknown
-    bool m_manual     = false;   // our belief, set by our own manual write
+    Manual  m_manual  = Manual::Off;       // from read-back only, never from our own write
+    Pending m_pendingOp = Pending::None;
+    QString m_notice;                      // why the tab changed its mind (shown in the hint)
+    bool    m_locked  = false;             // DISARM sent, waiting for the firmware to confirm
     bool m_inLink     = false;   // re-entrancy guard for "link all four"
 
     int  m_pending[kMotors] = { -1, -1, -1, -1 };   // slider pos waiting for the coalescing timer
     QTimer m_flushTimer;
     QTimer m_staleTimer;
+    QTimer m_pollTimer;      // 1 Hz CAL_motorManual read-back while ARMED
+    QTimer m_pendTimer;      // timeout of a pending manual on/off
+    QTimer m_lockTimer;      // releases m_locked if the DISARM never lands
     QElapsedTimer m_sinceSample;
 };
 

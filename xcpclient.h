@@ -5,6 +5,7 @@
 #include <QUdpSocket>
 #include <QHostAddress>
 #include <QQueue>
+#include <QSet>
 #include <QVector>
 #include <QPair>
 
@@ -112,7 +113,15 @@ public:
     // blocks exist -- it just moves their bytes in MAX_CTO-sized chunks.
     void pollMeasurements(const QVector<Block> &blocks);
     void readMemory(quint32 address, quint8 len);     // -> memoryRead()
-    void writeMemory(quint32 address, const QByteArray &data); // -> memoryWritten()
+    // Normal = append to the FIFO. Coalesce = if a write to the same address
+    // is still queued (not in flight), replace its payload instead of
+    // appending. Priority = place at the head of the queue, right after the
+    // request that is already in flight (used for DISARM / STOP ALL).
+    enum class WriteMode { Normal, Coalesce, Priority };
+    void writeMemory(quint32 address, const QByteArray &data,
+                     WriteMode mode = WriteMode::Normal); // -> memoryWritten()
+    // Drop queued (not in-flight) writes to these addresses.
+    void purgeWrites(const QSet<quint32> &addresses);
 
     // Configure and start the DAQ list (event channel 0, 100 ms on the board).
     // The block exceeds the 63-byte MAX_DTO, so it is split across
