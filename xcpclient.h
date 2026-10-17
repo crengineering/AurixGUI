@@ -141,10 +141,11 @@ signals:
 private slots:
     void onReadyRead();
     void onTimeout();
+    void onKeepaliveTimer();
 
 private:
     enum class ReqType { Connect, GetId, UploadId, PollChunk,
-                         MemRead, MemWrite, DaqCmd, DaqStart };
+                         MemRead, MemWrite, DaqCmd, DaqStart, GetStatus };
     struct Request {
         ReqType    type;
         QByteArray packet;
@@ -185,8 +186,9 @@ private:
     // Adopt a block set and size the receive buffers to it.
     void setBlocks(const QVector<Block> &blocks);
 
-    QUdpSocket     *m_socket  = nullptr;
-    QTimer         *m_timeout = nullptr;
+    QUdpSocket     *m_socket    = nullptr;
+    QTimer         *m_timeout   = nullptr;
+    QTimer         *m_keepalive = nullptr;
     QHostAddress    m_host;
     quint16         m_port     = 5555;
     quint16         m_ctr      = 0;

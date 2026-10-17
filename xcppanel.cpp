@@ -107,6 +107,10 @@ QString formatCharValue(const A2lChar &c, const uchar *p)
     }
     case A2lType::Uint32:
         return QString::number(qFromLittleEndian<quint32>(p));
+    case A2lType::Sint32:
+        return QString::number(qFromLittleEndian<qint32>(p));
+    case A2lType::Uint16:
+        return QString::number(qFromLittleEndian<quint16>(p));
     case A2lType::Uint8:
         return QString::number(uint(p[0]));
     }
@@ -145,6 +149,21 @@ QByteArray encodeCharValue(const A2lChar &c, const QString &text, bool *ok)
         if (!*ok) break;
         out.resize(4);
         qToLittleEndian<quint32>(v, out.data());
+        break;
+    }
+    case A2lType::Sint32: {
+        const qint32 v = s.toInt(ok, 0);     // base 0: "12" or "0x0C"
+        if (!*ok) break;
+        out.resize(4);
+        qToLittleEndian<qint32>(v, out.data());
+        break;
+    }
+    case A2lType::Uint16: {
+        const uint v = s.toUInt(ok, 0);
+        if (*ok && v > 65535u) *ok = false;
+        if (!*ok) break;
+        out.resize(2);
+        qToLittleEndian<quint16>(quint16(v), out.data());
         break;
     }
     case A2lType::Uint8: {
@@ -231,6 +250,18 @@ XcpPanel::XcpPanel(QWidget *parent)
     // host/port) and keep retrying, so a flash or a power cycle comes back
     // on its own instead of needing a click on Connect
     QTimer::singleShot(0, this, &XcpPanel::tryAutoConnect);
+
+    // The constructor's own loadA2l() call above already emitted a2lLoaded /
+    // a2lCharsLoaded once, but MainWindow only connects them to SystemFooter
+    // after `new XcpPanel` returns - that first emit had nobody listening.
+    // Re-emit once the event loop is running (same deferral idiom as
+    // tryAutoConnect() above) so the footer's ESC lamps and ARM/DISARM start
+    // from the already-loaded A2L instead of staying "unknown" until the
+    // user happens to reload it by hand.
+    QTimer::singleShot(0, this, [this]() {
+        emit a2lLoaded(m_meas);
+        emit a2lCharsLoaded(m_chars);
+    });
 }
 
 QWidget *XcpPanel::buildLiveTab()
@@ -785,6 +816,8 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
         m_attitudeView->setAvailable(m_meas);
     if (m_positionView)
         m_positionView->setAvailable(m_meas);
+    emit a2lLoaded(m_meas);   // -> SystemFooter (Actuators lamps)
+    emit a2lCharsLoaded(m_chars);   // -> SystemFooter (ARM/DISARM)
 }
 
 void XcpPanel::loadA2lFile()
@@ -1780,6 +1813,38 @@ void XcpPanel::writeCalRow(int row)
     }
 
     m_client->writeMemory(c.addr, bytes);
+}
+
+// Shared by armMotors()/disarmMotors(): resolve the CHARACTERISTIC by name
+// against the loaded A2L (never a hardcoded address) and write it exactly
+// like a Calibration tab row. onMemoryWritten()/onError() then take over
+// logging and the confirming read-back, same as any other characteristic
+// write.
+void XcpPanel::writeCharByName(const QString &name, quint32 value)
+{
+    for (const A2lChar &c : m_chars) {
+        if (c.name != name)
+            continue;
+        bool ok = false;
+        const QByteArray bytes = encodeCharValue(c, QString::number(value), &ok);
+        if (!ok) {
+            m_log->appendPlainText(QString("[Invalid value for %1 - aborted]").arg(name));
+            return;
+        }
+        m_client->writeMemory(c.addr, bytes);
+        return;
+    }
+    m_log->appendPlainText(QString("[%1 not in loaded A2L - write aborted]").arg(name));
+}
+
+void XcpPanel::armMotors()
+{
+    writeCharByName("CAL_motorCmd", 1);
+}
+
+void XcpPanel::disarmMotors()
+{
+    writeCharByName("CAL_motorCmd", 0);
 }
 
 void XcpPanel::exportCalibration()

@@ -35,9 +35,19 @@ class XcpPanel : public QWidget
 public:
     explicit XcpPanel(QWidget *parent = nullptr);
 
+public slots:
+    // Driven by SystemFooter's ARM/DISARM buttons. Both resolve CAL_motorCmd
+    // against the loaded A2L by name and write it like any other
+    // characteristic - errors and the confirming read-back go through the
+    // same onMemoryWritten()/onError() every Calibration tab write uses.
+    void armMotors();
+    void disarmMotors();
+
 signals:
     void connectionChanged(bool connected);   // drives the tab lamp icon
     void measurementsUpdated(const XcpClient::Measurements &m);  // -> SystemFooter
+    void a2lLoaded(const QVector<A2lMeas> &meas);  // -> SystemFooter (Actuators lamps)
+    void a2lCharsLoaded(const QVector<A2lChar> &chars);  // -> SystemFooter (ARM/DISARM)
 
 private slots:
     void toggleConnection();
@@ -138,6 +148,11 @@ private:
     // Rows are built from the A2L CHARACTERISTIC list (NVM block excluded);
     // row index == index into m_chars.
     void            writeCalRow(int row);
+    // Look up a CHARACTERISTIC by name in m_chars and write it. Shared by
+    // writeCalRow() (kept as-is, it writes the row's edited text) and
+    // armMotors()/disarmMotors(), which write a fixed value instead of a
+    // table cell. Logs and aborts if the A2L does not describe the name.
+    void            writeCharByName(const QString &name, quint32 value);
     void            loadA2l(const QString &path, bool remember);
     QWidget        *buildSensorsTab();
     void            rebuildDiagTable();
