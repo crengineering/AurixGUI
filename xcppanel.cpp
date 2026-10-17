@@ -241,6 +241,13 @@ XcpPanel::XcpPanel(QWidget *parent)
     connect(m_client, &XcpClient::measurementsReceived, this, &XcpPanel::onMeasurements);
     connect(m_client, &XcpClient::memoryRead,           this, &XcpPanel::onMemoryRead);
     connect(m_client, &XcpClient::memoryWritten,        this, &XcpPanel::onMemoryWritten);
+    connect(m_client, &XcpClient::memoryReadFailed,     this, [this](quint32 address) {
+        // The failed request is the oldest one outstanding: forget its tag so
+        // later replies do not shift onto it.
+        const MotorReadPlan plan = motorReadPlan(m_chars);
+        if (plan.ok && address == plan.lo)
+            m_motorReadTags.dropOldest();
+    });
     connect(m_client, &XcpClient::daqStarted,           this, &XcpPanel::onDaqStarted);
     connect(m_client, &XcpClient::daqFailed,            this, &XcpPanel::onDaqFailed);
     connect(m_client, &XcpClient::errorOccurred,        this, &XcpPanel::onError);
@@ -1947,6 +1954,8 @@ void XcpPanel::disarmMotors()
         m_log->appendPlainText("[Motors] DISARM requested while disconnected - nothing sent");
         return;
     }
+    if (m_motorView)
+        m_motorView->onDisarmIssued();   // clear pending slider writes + lock, as its own DISARM does
     m_client->purgeWrites(motorWriteAddrs(m_chars, /*setpointsOnly=*/false));
     m_disarmClock.start();
     const bool sent = writeCharByName("CAL_motorCmd", 0, XcpClient::WriteMode::Priority);
@@ -1981,13 +1990,12 @@ void XcpPanel::readMotorBack()
     if (!plan.ok)
         return;                 // reason is shown in the tab (see loadA2l)
     if (m_motorReadClock.isValid() && m_motorReadClock.elapsed() < 120
-        && m_motorLastReadSeq == m_motorWriteSeq && !m_motorReadTags.isEmpty())
+        && m_motorLastReadSeq == m_motorWriteSeq && m_motorReadTags.pending())
         return;                 // an equivalent read is already on its way
+    if (!m_motorReadTags.issue(m_motorWriteSeq))
+        return;                 // too many unanswered; never evict a tag (see MotorReadTags)
     m_motorReadClock.restart();
     m_motorLastReadSeq = m_motorWriteSeq;
-    m_motorReadTags.enqueue(m_motorWriteSeq);
-    while (m_motorReadTags.size() > 8)
-        m_motorReadTags.dequeue();   // lost replies (XCP error) must not pile up
     m_client->readMemory(plan.lo, quint8(plan.len));
 }
 
@@ -1997,8 +2005,9 @@ bool XcpPanel::handleMotorRead(quint32 address, const QByteArray &data)
     const QMap<QString, quint32> values = motorParseRead(m_chars, plan, address, data);
     if (values.isEmpty())
         return false;
-    const quint32 tag = m_motorReadTags.isEmpty() ? 0u : m_motorReadTags.dequeue();
-    const bool fresh = (tag == m_motorWriteSeq);
+    quint32 tag = 0;
+    const bool haveTag = m_motorReadTags.take(&tag);
+    const bool fresh = haveTag && MotorReadTags::isFresh(tag, m_motorWriteSeq);
     populateCharsFromRead(address, data, /*quiet=*/true);   // keep the Calibration rows current
     emit motorCharsRead(values, fresh);
     return true;
@@ -2177,8 +2186,10 @@ void XcpPanel::setConnectedState(bool connected)
         m_positionView->setConnected(connected);
     if (m_motorView)
         m_motorView->setConnected(connected);
-    if (!connected)
+    if (!connected) {
         m_disarmPending = false;
+        m_motorReadTags.clear();   // nothing in flight survives a disconnect
+    }
 
     m_connectBtn->setText(connected ? "Disconnect" : "Connect");
     m_hostEdit->setEnabled(!connected);

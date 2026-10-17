@@ -491,6 +491,8 @@ void XcpClient::handleResponse(const QByteArray &packet)
             dropConnection("Connection setup failed");
             return;
         }
+        if (m_current.type == ReqType::MemRead)
+            emit memoryReadFailed(m_current.addr);
         if (m_current.type == ReqType::DaqCmd || m_current.type == ReqType::DaqStart) {
             // abort the remaining setup steps, panel falls back to polling
             QQueue<Request> keep;

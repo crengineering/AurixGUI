@@ -173,6 +173,26 @@ int main(int argc, char **argv)
         check("parse with a bad plan returns nothing", motorParseRead(far, bad, 0x2140, d).isEmpty());
     }
 
+    // read-tag bookkeeping: never fresh unless issued after the last write
+    {
+        MotorReadTags t;
+        quint32 seq = 0, tag = 0;
+        for (int i = 0; i < MotorReadTags::kMax; ++i)
+            t.issue(seq);                                   // 8 unanswered reads, all at seq 0
+        ++seq;                                              // a CAL_motor* write follows
+        check("tags: 9th read is refused, nothing evicted", !t.issue(seq) && t.size() == MotorReadTags::kMax);
+        bool anyFresh = false;
+        while (t.take(&tag))
+            anyFresh = anyFresh || MotorReadTags::isFresh(tag, seq);
+        check("tags: replies to pre-write reads are never fresh (even after overflow)", !anyFresh);
+        check("tags: a read issued after the write is fresh", t.issue(seq) && t.take(&tag) && MotorReadTags::isFresh(tag, seq));
+        t.issue(1); t.issue(2);
+        t.dropOldest();
+        check("tags: errored read drops the oldest tag", t.take(&tag) && tag == 2);
+        t.issue(3); t.clear();
+        check("tags: clear() (disconnect) empties the queue", !t.pending());
+    }
+
     std::printf("%s\n", g_fail == 0 ? "[xcp_queue_selfcheck] PASS" : "[xcp_queue_selfcheck] FAIL");
     return g_fail == 0 ? 0 : 1;
 }

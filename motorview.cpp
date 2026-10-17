@@ -336,18 +336,9 @@ MotorView::MotorView(QWidget *parent)
     // ---- wiring -----------------------------------------------------------
     connect(m_armBtn,     &QPushButton::clicked, this, &MotorView::onArmClicked);
     connect(m_disarmBtn,  &QPushButton::clicked, this, [this]() {
-        // No confirmation: kill button. Drop pending slider writes and lock
-        // the sliders; the reset to STOP/OFF happens on the CONFIRMED exit
-        // from ARMED (EscMotorState), not on the click.
-        m_flushTimer.stop();
-        for (int &p : m_pending) p = -1;
-        m_pendingOp = Pending::None;
-        m_pendTimer.stop();
-        m_locked = true;
-        m_lockTimer.start();
+        // No confirmation: kill button.
+        onDisarmIssued();
         emit disarmRequested();
-        updateControls();
-        updateBanner();
     });
     connect(m_stopAllBtn, &QPushButton::clicked, this, &MotorView::onStopAll);
     connect(m_manualBtn,  &QPushButton::clicked, this, [this]() { onManualClicked(m_manual != Manual::On); });
@@ -850,6 +841,20 @@ void MotorView::pendingTimeout()
     case Pending::None:
         break;
     }
+}
+
+// Drop pending slider writes and lock the sliders; the reset to STOP/OFF
+// happens on the CONFIRMED exit from ARMED (EscMotorState), not on the click.
+void MotorView::onDisarmIssued()
+{
+    m_flushTimer.stop();
+    for (int &p : m_pending) p = -1;
+    m_pendingOp = Pending::None;
+    m_pendTimer.stop();
+    m_locked = true;
+    m_lockTimer.start();
+    updateControls();
+    updateBanner();
 }
 
 void MotorView::setReadBackProblem(const QString &reason)

@@ -144,6 +144,7 @@ signals:
     void measurementsReceived(const XcpClient::Measurements &m);
     void memoryRead(quint32 address, const QByteArray &data);
     void memoryWritten(quint32 address);
+    void memoryReadFailed(quint32 address);   // the board answered a SHORT_UPLOAD with an error
     void daqStarted();
     void daqFailed();
     void errorOccurred(const QString &message);

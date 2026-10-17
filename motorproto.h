@@ -2,6 +2,7 @@
 #define MOTORPROTO_H
 
 #include <QByteArray>
+#include <QQueue>
 #include <QMap>
 #include <QSet>
 #include <QString>
@@ -91,5 +92,41 @@ inline QMap<QString, quint32> motorParseRead(const QVector<A2lChar> &chars, cons
     }
     return values;
 }
+
+// Bookkeeping for read-backs in flight. Each read is tagged with the
+// CAL_motor* write sequence number at the moment it was issued; replies arrive
+// in issue order, so take() yields the tag of the request a reply belongs to.
+// INVARIANT: a reply is fresh only if no CAL_motor* write was enqueued after
+// its own request. When full, issue() REFUSES a new read (it never evicts or
+// shifts tags), so a reply can never pick up a newer request's tag.
+class MotorReadTags
+{
+public:
+    static constexpr int kMax = 8;
+
+    bool issue(quint32 writeSeq)
+    {
+        if (m_q.size() >= kMax)
+            return false;
+        m_q.enqueue(writeSeq);
+        return true;
+    }
+    bool pending() const { return !m_q.isEmpty(); }
+    int  size() const { return m_q.size(); }
+    // Tag of the oldest outstanding read (the one the next reply / error is for).
+    bool take(quint32 *tag)
+    {
+        if (m_q.isEmpty())
+            return false;
+        *tag = m_q.dequeue();
+        return true;
+    }
+    void dropOldest() { if (!m_q.isEmpty()) m_q.dequeue(); }   // its request errored
+    void clear() { m_q.clear(); }                               // disconnect
+    static bool isFresh(quint32 tag, quint32 currentWriteSeq) { return tag == currentWriteSeq; }
+
+private:
+    QQueue<quint32> m_q;
+};
 
 #endif // MOTORPROTO_H

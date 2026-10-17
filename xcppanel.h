@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QMap>
 #include <QQueue>
+#include "motorproto.h"
 #include <QSet>
 #include <QVector>
 #include "xcpclient.h"
@@ -247,7 +248,7 @@ private:
     MotorView           *m_motorView    = nullptr;   // "Motors" sub-tab
     QTimer              *m_motorSpReadTimer = nullptr;   // 200 ms after the last Sp write
     QElapsedTimer        m_motorReadClock;
-    QQueue<quint32>      m_motorReadTags;               // write-seq at issue time, one per read in flight
+    MotorReadTags        m_motorReadTags;               // write-seq at issue time, one per read in flight
     quint32              m_motorWriteSeq = 0;           // bumped by every CAL_motor* write enqueued
     quint32              m_motorLastReadSeq = 0;
     bool                 m_motorSpanLogged = false;

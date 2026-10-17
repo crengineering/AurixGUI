@@ -252,6 +252,17 @@ int main(int argc, char **argv)
         check("STOP ALL: sliders at STOP", r.sliders()[1]->value() == kMotorSliderStop);
     }
 
+    // 7b. a footer DISARM (XcpPanel -> onDisarmIssued) locks like the tab's own button
+    {
+        Rig r;
+        r.goManualOn();
+        r.writes.clear();
+        r.sliders()[0]->setValue(900);
+        r.view.onDisarmIssued();
+        wait(150);
+        check("external DISARM: pending setpoint dropped, sliders locked", r.writes.isEmpty() && !r.slidersEnabled());
+    }
+
     // 8. A2L reload keeps state and values
     {
         Rig r;

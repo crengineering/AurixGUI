@@ -49,6 +49,9 @@ public slots:
     // is the only source for the manual toggle and the slider enable state.
     // fresh = the read was issued after the last CAL_motor* write was enqueued;
     // a stale reply never confirms a pending manual on/off step.
+    // A DISARM was issued (this tab's button or the footer's): drop pending slider
+    // writes and lock the sliders until the firmware confirms the exit from ARMED.
+    void onDisarmIssued();
     void onCharsRead(const QMap<QString, quint32> &values, bool fresh = true);
     void setReadBackProblem(const QString &reason);   // read-back window unusable (A2L layout)
 
