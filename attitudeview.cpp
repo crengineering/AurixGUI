@@ -197,6 +197,7 @@ AttitudeView::AttitudeView(QWidget *parent)
 
     updateBoundState();
     resetCrossCheck();
+    m_haveLastQuat = false;
 
     // SWE1-GUI-012: restore the stored alignment; a missing or non-finite
     // value is ignored (treated as cleared).
@@ -204,7 +205,7 @@ AttitudeView::AttitudeView(QWidget *parent)
         QSettings settings;
         bool ok = false;
         const double psi0 = settings.value("attitude/yawAlignDeg").toDouble(&ok);
-        applyAlign(settings.contains("attitude/yawAlignDeg") && ok && std::isfinite(psi0), psi0);
+        applyAlign(settings.contains("attitude/yawAlignDeg") && ok && std::isfinite(psi0) && std::abs(psi0) <= 360.0, psi0);
     }
 }
 
@@ -252,6 +253,7 @@ void AttitudeView::setAvailable(const QVector<A2lMeas> &meas)
     m_idxYaw   = indexOfMeas(meas, "AttYaw");
     m_idxState = indexOfMeas(meas, "AttState");
 
+    m_haveLastQuat = false;   // A2L reload: previous pose must not feed Align
     m_bound = m_idxQuat[0] >= 0 && m_idxQuat[1] >= 0 && m_idxQuat[2] >= 0 && m_idxQuat[3] >= 0;
     updateBoundState();
     // A (possibly different) A2L may resolve AttRoll/AttPitch to different
@@ -286,8 +288,10 @@ void AttitudeView::setConnected(bool connected)
     // false -> true: a fresh session on (potentially) a different board or
     // after a reflash -- a mismatch counted against the previous session
     // must not silently keep showing as evidence about this one.
-    if (connected && !m_connected)
+    if (connected && !m_connected) {
         resetCrossCheck();
+        m_haveLastQuat = false;
+    }
 
     m_connected = connected;
     if (!connected) {
@@ -314,9 +318,6 @@ void AttitudeView::feedSample(const XcpClient::Measurements &m)
     if (!std::isfinite(w) || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
         return;   // NaN-guard: never feed a broken frame into the renderer
 
-    m_lastQuat[0] = w; m_lastQuat[1] = x; m_lastQuat[2] = y; m_lastQuat[3] = z;
-    m_haveLastQuat = true;
-
     const bool haveState = m_idxState >= 0;
     int state = -1;
     if (haveState) {
@@ -336,6 +337,13 @@ void AttitudeView::feedSample(const XcpClient::Measurements &m)
         m_gl->setLive(live);
         if (live)
             m_gl->pushQuaternion(w, x, y, z);
+        // Align yaw may only use a sample the renderer also accepts: live and
+        // within the same norm gate as pushQuaternion().
+        const float n = std::sqrt(w * w + x * x + y * y + z * z);
+        if (live && n >= 0.5f && n <= 1.5f) {
+            m_lastQuat[0] = w / n; m_lastQuat[1] = x / n; m_lastQuat[2] = y / n; m_lastQuat[3] = z / n;
+            m_haveLastQuat = true;
+        }
     }
 
     double roll = 0.0, pitch = 0.0, yaw = 0.0;

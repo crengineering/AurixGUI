@@ -222,7 +222,12 @@ bool attitudeSelfCheck(QString *report)
         const bool noop = (same.vector() - board.vector()).length() < 1e-6f
                        && std::abs(same.scalar() - board.scalar()) < 1e-6f;
         const bool yawOk = std::abs(attitudeQuaternionYawDeg(board) - 90.0) < 1e-3;
-        const bool ok = identity && noop && yawOk;
+        // Order check (z-rotations commute, so add a non-commuting roll):
+        // q_z(90) (x) q_x(30) with psi0=90 must leave pure q_x(30).
+        const QQuaternion qx30 = QQuaternion::fromAxisAndAngle(1, 0, 0, 30.0f);
+        const QQuaternion v2 = attitudeViewQuaternion(QQuaternion::fromAxisAndAngle(0, 0, 1, 90.0f) * qx30, 90.0);
+        const bool order = std::abs(std::abs(QQuaternion::dotProduct(v2, qx30)) - 1.0f) < 1e-5f;
+        const bool ok = identity && noop && yawOk && order;
         allOk = allOk && ok;
         out += QString("  view yaw align psi0=90, board yaw +90 -> identity (q=%1,%2,%3,%4), psi0=0 no-op -- %5\n")
                    .arg(double(view.scalar()), 0, 'f', 4).arg(double(view.x()), 0, 'f', 4)
