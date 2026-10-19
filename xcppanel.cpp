@@ -1932,6 +1932,10 @@ void XcpPanel::writeMotorChar(const QString &name, quint32 value)
         m_log->appendPlainText(QString("[Motors: refused %1 = %2 (DShot 1..47 are commands)]").arg(name).arg(value));
         return;
     }
+    if (motorIsCeilingChar(name) && !motorCeilingValid(value)) {
+        m_log->appendPlainText(QString("[Motors: refused %1 = %2 (ceiling must be 48..2047)]").arg(name).arg(value));
+        return;
+    }
     // A setpoint still waiting in the queue is replaced, not followed by
     // another write: a slider drag can never build a backlog.
     writeCharByName(name, value,

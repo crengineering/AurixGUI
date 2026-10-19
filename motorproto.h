@@ -25,6 +25,13 @@ inline bool motorIsSetpointChar(const QString &name)
     return name.startsWith(QLatin1String("CAL_motorManualSp_"));
 }
 
+// The DShot ceiling lives in the same CAL block but is not part of the arm /
+// manual-throttle kill path: DISARM must not purge a queued ceiling write.
+inline bool motorIsCeilingChar(const QString &name)
+{
+    return name == QLatin1String("CAL_motorSpMax");
+}
+
 // Addresses of every CAL_motor* word (cmd, manual, setpoints), or of the
 // setpoints only. DISARM purges the former so no queued ARM / manual-ON write
 // can execute after the kill.
@@ -32,7 +39,8 @@ inline QSet<quint32> motorWriteAddrs(const QVector<A2lChar> &chars, bool setpoin
 {
     QSet<quint32> a;
     for (const A2lChar &c : chars)
-        if (setpointsOnly ? motorIsSetpointChar(c.name) : motorIsMotorChar(c.name))
+        if (setpointsOnly ? motorIsSetpointChar(c.name)
+                          : (motorIsMotorChar(c.name) && !motorIsCeilingChar(c.name)))
             a.insert(c.addr);
     return a;
 }

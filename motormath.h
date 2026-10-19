@@ -38,6 +38,25 @@ inline bool motorDshotWritable(quint32 v, int maxDshot = kMotorDshotMax)
     return v == 0 || (v >= quint32(kMotorDshotMin) && v <= quint32(maxDshot));
 }
 
+// DShot throttle ceiling (CAL_motorSpMax, firmware RAM calibration, default
+// 1600): valid range is 48..2047; the firmware reverts anything else.
+inline bool motorCeilingValid(quint32 v)
+{
+    return v >= quint32(kMotorDshotMin) && v <= quint32(kMotorDshotMax);
+}
+
+// Upper end of the slider / spinbox range. spHi = A2L upper limit of
+// CAL_motorManualSp_Mn; ceiling = the firmware's read-back CAL_motorSpMax, or
+// -1 when unknown / not in the A2L (then the fixed A2L range applies). The
+// STOP position (47) and the 48..max encoding never change, only the top.
+inline int motorEffectiveMax(int spHi, int ceiling)
+{
+    int m = qBound(kMotorDshotMin, spHi, kMotorDshotMax);
+    if (ceiling >= kMotorDshotMin)
+        m = qMin(m, qMin(ceiling, kMotorDshotMax));
+    return m;
+}
+
 // EscMnDshotCmd -> 0..1 bar fill (fraction of 2047). Garbage clamps, never NaN.
 inline double motorBarFraction(double dshot)
 {
@@ -89,6 +108,18 @@ inline bool motorSelfCheck(QString *report)
           !motorDshotWritable(1) && !motorDshotWritable(47) && !motorDshotWritable(2048));
     check("writable accepts 0, 48, 2047",
           motorDshotWritable(0) && motorDshotWritable(48) && motorDshotWritable(2047));
+
+    check("ceiling valid 48 / 1600 / 2047", motorCeilingValid(48) && motorCeilingValid(1600) && motorCeilingValid(2047));
+    check("ceiling invalid 0 / 47 / 2048", !motorCeilingValid(0) && !motorCeilingValid(47) && !motorCeilingValid(2048));
+    check("effective max: ceiling 1600 -> 1600", motorEffectiveMax(2047, 1600) == 1600);
+    check("effective max: ceiling 2047 -> 2047", motorEffectiveMax(2047, 2047) == 2047);
+    check("effective max: no ceiling (fallback) -> 2047", motorEffectiveMax(2047, -1) == 2047);
+    check("effective max: A2L limit 1000 wins over ceiling 1600", motorEffectiveMax(1000, 1600) == 1000);
+    check("effective max: ceiling 48 -> 48", motorEffectiveMax(2047, 48) == 48);
+    check("1600 ceiling: slider 2047 writes 1600, 47 still STOP",
+          motorSliderToDshot(2047, 1600) == 1600 && motorSliderToDshot(47, 1600) == 0);
+    check("1600 ceiling: 1601 not writable, 1600 / 0 are",
+          !motorDshotWritable(1601, 1600) && motorDshotWritable(1600, 1600) && motorDshotWritable(0, 1600));
 
     check("bar 0 -> 0", motorBarFraction(0) == 0.0);
     check("bar 2047 -> 1", motorBarFraction(2047) == 1.0);

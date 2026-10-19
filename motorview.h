@@ -86,6 +86,10 @@ private:
     enum class Manual { Unknown, Off, On };                 // as read back from the firmware
     enum class Pending { None, AwaitZeros, AwaitOn, AwaitOff };   // operator request in flight
 
+    void applyCeiling(quint32 value, bool fresh);
+    void applyRange();                    // slider / spinbox maximum from A2L limit + ceiling
+    void onSetCeiling();
+    void updateCeilingUi();
     void onSliderChanged(int motor, int pos);
     void onSpinChanged(int motor, int pos);
     void onArmClicked();
@@ -119,7 +123,15 @@ private:
     int  m_idxState = -1;
     bool m_charsOk  = false;     // CAL_motorCmd + CAL_motorManual + Sp_M1..4 all in the A2L
     bool m_cmdOk    = false;     // CAL_motorCmd alone (ARM/DISARM)
-    int  m_spMax    = 2047;      // upper limit of CAL_motorManualSp_Mn from the A2L
+    int  m_spHi     = 2047;      // upper limit of CAL_motorManualSp_Mn from the A2L
+    int  m_spMax    = 2047;      // effective slider maximum: min(m_spHi, ceiling read-back)
+    bool m_ceilOk   = false;     // CAL_motorSpMax is in the A2L (older firmware: false)
+    int  m_ceiling  = -1;        // CAL_motorSpMax as read back from the firmware, -1 unknown
+    int  m_ceilReq  = -1;        // value of an unconfirmed "Set ceiling" write, -1 none
+    QLabel      *m_ceilLbl = nullptr;
+    QSpinBox    *m_ceilSpin = nullptr;
+    QPushButton *m_ceilBtn = nullptr;
+    QTimer       m_ceilTimer;    // timeout of an unconfirmed ceiling write
 
     bool m_connected  = false;
     bool m_haveSample = false;
