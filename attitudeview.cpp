@@ -9,6 +9,7 @@
 #include <QFormLayout>
 #include <QFont>
 #include <QDateTime>
+#include <QSettings>
 #include <QDebug>
 #include <QtMath>
 #include <cmath>
@@ -127,16 +128,41 @@ AttitudeView::AttitudeView(QWidget *parent)
     auto *form = new QFormLayout(readoutBox);
     form->addRow("Roll:",  m_rollLbl);
     form->addRow("Pitch:", m_pitchLbl);
-    form->addRow("Yaw:",   m_yawLbl);
+    m_alignLbl = new QLabel;
+    m_alignLbl->setStyleSheet("QLabel { color: #b9770e; font-weight: bold; }");
+    m_alignLbl->setToolTip("The 3D model is pre-rotated about the vertical by this offset "
+                           "(SWE1-GUI-012). View only: the numbers and the board are unchanged.");
+    m_alignLbl->setVisible(false);
+    auto *yawCol = new QVBoxLayout;
+    yawCol->setSpacing(0);
+    yawCol->setContentsMargins(0, 0, 0, 0);
+    yawCol->addWidget(m_yawLbl);
+    yawCol->addWidget(m_alignLbl);
+    form->addRow("Yaw:",   yawCol);
     form->addRow("State:", m_stateLbl);
     form->addRow("Cross-check:", m_crossCheckLbl);
 
     m_resetViewBtn = new QPushButton("Reset view");
     connect(m_resetViewBtn, &QPushButton::clicked, m_gl, &AttitudeGLWidget::resetView);
 
+    m_alignYawBtn = new QPushButton("Align yaw");
+    m_alignYawBtn->setToolTip("Take the board's current heading as 'toward the screen': the 3D model is "
+                              "rotated about the vertical by that offset. View only - nothing is written "
+                              "to the board. Remembered across restarts.");
+    m_clearAlignBtn = new QPushButton("Clear");
+    m_clearAlignBtn->setToolTip("Remove the yaw alignment (north-up rendering).");
+    m_clearAlignBtn->setEnabled(false);
+    connect(m_alignYawBtn,   &QPushButton::clicked, this, &AttitudeView::alignYaw);
+    connect(m_clearAlignBtn, &QPushButton::clicked, this, &AttitudeView::clearAlign);
+
+    auto *alignRow = new QHBoxLayout;
+    alignRow->addWidget(m_alignYawBtn);
+    alignRow->addWidget(m_clearAlignBtn);
+
     auto *side = new QVBoxLayout;
     side->addWidget(readoutBox);
     side->addWidget(m_resetViewBtn);
+    side->addLayout(alignRow);
     side->addStretch(1);
 
     auto *sideWidget = new QWidget;
@@ -171,6 +197,47 @@ AttitudeView::AttitudeView(QWidget *parent)
 
     updateBoundState();
     resetCrossCheck();
+
+    // SWE1-GUI-012: restore the stored alignment; a missing or non-finite
+    // value is ignored (treated as cleared).
+    {
+        QSettings settings;
+        bool ok = false;
+        const double psi0 = settings.value("attitude/yawAlignDeg").toDouble(&ok);
+        applyAlign(settings.contains("attitude/yawAlignDeg") && ok && std::isfinite(psi0), psi0);
+    }
+}
+
+void AttitudeView::applyAlign(bool active, double psi0Deg)
+{
+    m_alignActive = active;
+    m_alignPsi0   = active ? psi0Deg : 0.0;
+    if (m_gl)
+        m_gl->setYawOffsetDeg(m_alignPsi0);
+    m_alignLbl->setVisible(active);
+    if (active)
+        m_alignLbl->setText(QString("view aligned %1°").arg(qRound(-m_alignPsi0)));
+    m_clearAlignBtn->setEnabled(active);
+}
+
+void AttitudeView::alignYaw()
+{
+    if (!m_haveLastQuat || !m_connected) {
+        m_stateLbl->setText("Align yaw: needs a live attitude sample (connect first)");
+        return;
+    }
+    const QQuaternion q(m_lastQuat[0], m_lastQuat[1], m_lastQuat[2], m_lastQuat[3]);
+    const double psi0 = attitudeQuaternionYawDeg(q);
+    if (!std::isfinite(psi0))
+        return;
+    applyAlign(true, psi0);
+    QSettings().setValue("attitude/yawAlignDeg", psi0);
+}
+
+void AttitudeView::clearAlign()
+{
+    applyAlign(false, 0.0);
+    QSettings().remove("attitude/yawAlignDeg");
 }
 
 void AttitudeView::setAvailable(const QVector<A2lMeas> &meas)
@@ -246,6 +313,9 @@ void AttitudeView::feedSample(const XcpClient::Measurements &m)
     const float w = float(qv[0]), x = float(qv[1]), y = float(qv[2]), z = float(qv[3]);
     if (!std::isfinite(w) || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
         return;   // NaN-guard: never feed a broken frame into the renderer
+
+    m_lastQuat[0] = w; m_lastQuat[1] = x; m_lastQuat[2] = y; m_lastQuat[3] = z;
+    m_haveLastQuat = true;
 
     const bool haveState = m_idxState >= 0;
     int state = -1;
