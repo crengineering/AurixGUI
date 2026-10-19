@@ -1886,6 +1886,11 @@ void XcpPanel::writeCalRow(int row)
         return;
     }
 
+    if (motorIsCeilingChar(c.name) && !motorCeilingValid(quint32(m_calTable->item(row, 3)->text().toUInt()))) {
+        m_log->appendPlainText(QString("[%1 must be 48..2047 - aborted]").arg(c.name));
+        return;
+    }
+
     m_client->writeMemory(c.addr, bytes);
 }
 

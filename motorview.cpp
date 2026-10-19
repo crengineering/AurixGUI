@@ -464,12 +464,23 @@ void MotorView::setCharsAvailable(const QVector<A2lChar> &chars)
 void MotorView::applyRange()
 {
     m_spMax = motorEffectiveMax(m_spHi, m_ceilOk ? m_ceiling : -1);
+    bool clamped = false;
     for (int i = 0; i < kMotors; ++i) {
         // setMaximum may clamp the value; that must never look like a user move.
+        const bool over = m_ui[i].slider->value() > m_spMax;
         const QSignalBlocker b1(m_ui[i].slider), b2(m_ui[i].spin);
         m_ui[i].slider->setMaximum(m_spMax);
         m_ui[i].spin->setMaximum(m_spMax);
+        // The firmware clamp never rewrites CAL_motorManualSp_Mn: while manual is
+        // ON, write the clamped position so the firmware holds what is shown
+        // (otherwise raising the ceiling later would put the old value on the wire).
+        if (over && m_manual == Manual::On && m_connected) {
+            m_pending[i] = m_spMax;
+            clamped = true;
+        }
     }
+    if (clamped && !m_flushTimer.isActive())
+        m_flushTimer.start();
     // A queued slider position above a lowered ceiling is clamped, never sent.
     for (int &p : m_pending)
         if (p > m_spMax)

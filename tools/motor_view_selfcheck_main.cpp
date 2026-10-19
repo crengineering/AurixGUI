@@ -383,6 +383,52 @@ int main(int argc, char **argv)
               r.sliders()[0]->maximum() == 2047 && r.hasText("not in force"));
     }
 
+    // 11b. lowering the ceiling under a live slider rewrites the setpoint
+    {
+        Rig r;
+        r.addCeilingChar();
+        r.view.setConnected(true);
+        r.sample(2);
+        r.readBackCeil(0, 2047);
+        r.button("Manual throttle")->click();
+        r.readBackCeil(0, 2047);
+        r.readBackCeil(1, 2047);
+        r.sliders()[1]->setValue(1800);
+        wait(120);
+        r.writes.clear();
+        r.readBackCeil(1, 1600);
+        wait(120);
+        check("ceiling lowered under slider 1800: slider shows 1600", r.sliders()[1]->value() == 1600);
+        check("ceiling lowered under slider 1800: write of 1600 to M2",
+              r.countWrites("CAL_motorManualSp_M2") == 1 && r.writes.size() == 1 && r.writes[0].second == 1600);
+    }
+
+    // 11c. ceiling unknown / disconnect / unconfirmed
+    {
+        Rig r;
+        r.addCeilingChar();
+        r.view.setConnected(true);
+        r.sample(2);
+        QMap<QString, quint32> v;   // read-back without the ceiling
+        v["CAL_motorCmd"] = 1; v["CAL_motorManual"] = 0;
+        for (int i = 1; i <= 4; ++i) v[QString("CAL_motorManualSp_M%1").arg(i)] = 0;
+        r.view.onCharsRead(v);
+        check("ARMED, ceiling unknown: Manual and sliders not writable",
+              !r.button("Manual throttle")->isEnabled() && !r.slidersEnabled());
+        r.readBackCeil(0, 1600);
+        check("ceiling known: Manual writable", r.button("Manual throttle")->isEnabled());
+        r.view.setConnected(false);
+        r.view.setConnected(true);
+        r.sample(2);
+        check("reconnect: ceiling unknown again (label --, Manual not writable)",
+              r.hasText("Ceiling (CAL_motorSpMax): --") && !r.button("Manual throttle")->isEnabled());
+        r.readBackCeil(0, 1600);
+        r.ceilBtn()->click();
+        wait(1700);
+        r.sample(2);
+        check("no confirmation in 1.5 s: announced as not confirmed", r.hasText("not confirmed"));
+    }
+
     // 12. ceiling write while DISARMED, and fallback without CAL_motorSpMax
     {
         Rig r;
