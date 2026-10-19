@@ -62,6 +62,7 @@ lands.
 | `NavHorizontalOk` becomes a non-latching "trusted and fresh" flag; `NavGnssTrusted`/`NavStationaryLocked` added (`Xcp_Fusion` 0xBD/0xBE, fw ≥ 1.19.26, SWE1-FW-011/-014) | this commit (three-way horizontal anchoring text + LOCK badge, `positionview.*`/`positionmath.*`; older A2Ls without the two new channels still work via the `[legacy]`-tagged two-way reading) | 2026-09-15 |
 | Second diagnostics word `NavDiag` at the `Xcp_Fusion` tail (`0x700305FC`, `NavDiag_GnssUntrusted` bit 0, fw ≥ 1.19.30, SWE1-FW-011) | this commit (Diagnostics tab renders one section per A2L-derived diagnostic word instead of one hardcoded word, `diagmath.*`/`xcppanel.cpp`; an A2L with only the old `diagStatus` word still renders exactly as before) | 2026-09-15 |
 | Motors tab: `CAL_motorCmd`/`CAL_motorManual`/`CAL_motorManualSp_M1..4` (`Xcp_Cal`) and the `Xcp_Esc` block (`EscMotorState`, `EscM<n>DshotCmd/BidirRpm/BidirErpm/BidirOk/Alive/…`), motor.c state machine with XCP-link failsafe | this commit (Motors tab, `motorview.*`/`motormath.h`; an A2L without them shows "not in this A2L" and stays inert) | 2026-10-17 |
+| DShot throttle ceiling (`CAL_motorSpMax`, `Xcp_Cal` 0x50, fw PR #28) | commit `2027c6e` (Motors tab ceiling field, `motorview.*`; older GUI still works but cannot raise the ceiling above 1600 without the Calibration tab) | 2026-10-19 |
 
 ![Motors tab: ARMED banner, manual-throttle switch, four motor columns with throttle slider, DShot value and rpm, bidirectional-DShot and KISS telemetry blocks underneath](docs/img/motor-tab.png)
 

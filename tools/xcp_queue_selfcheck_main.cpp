@@ -165,6 +165,18 @@ int main(int argc, char **argv)
         check("parse: over-long reply rejected", motorParseRead(chars, p, 0x2140, d + QByteArray(1, 'x')).isEmpty());
         check("parse: wrong address rejected", motorParseRead(chars, p, 0x2141, d).isEmpty());
 
+        // CAL_motorSpMax (0x2150 here, after M4 and a reserved word) joins the read window
+        // but not the DISARM purge set.
+        QVector<A2lChar> withCeil = chars;
+        A2lChar sm; sm.name = "CAL_motorSpMax"; sm.addr = 0x214E + 2; sm.type = A2lType::Uint16; withCeil.append(sm);
+        const MotorReadPlan pc = motorReadPlan(withCeil);
+        check("ceiling: read plan widens to 18 bytes (real A2L 0x..140..0x..152)", pc.ok && pc.lo == 0x2140 && pc.len == 18);
+        check("ceiling: not in the DISARM purge set (6 stay), not a setpoint",
+              motorWriteAddrs(withCeil, false).size() == 6 && motorWriteAddrs(withCeil, true).size() == 4);
+        QByteArray dc(18, '\0');
+        dc.replace(16, 2, w16(1600));
+        check("ceiling: parsed from the read-back", motorParseRead(withCeil, pc, 0x2140, dc).value("CAL_motorSpMax") == 1600);
+
         QVector<A2lChar> far = chars;
         A2lChar f; f.name = "CAL_motorManualSp_M9"; f.addr = 0x2140 + 80; f.type = A2lType::Uint16; far.append(f);
         const MotorReadPlan bad = motorReadPlan(far);

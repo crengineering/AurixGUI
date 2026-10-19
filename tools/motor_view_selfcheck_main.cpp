@@ -13,6 +13,8 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSlider>
+#include <QSpinBox>
+#include <QCheckBox>
 #include <QTimer>
 #include <cstdio>
 
@@ -64,6 +66,41 @@ struct Rig {
         QObject::connect(&view, &MotorView::logMessage, &view, [this](const QString &t) { lastLog = t; });
     }
 
+    // Variant with CAL_motorSpMax in the A2L (call before connecting)
+    void addCeilingChar()
+    {
+        QVector<A2lMeas> meas;
+        A2lMeas st; st.name = "EscMotorState"; st.addr = 0x1000; st.type = A2lType::Uint8; st.hi = 3;
+        meas.append(st);
+        QVector<A2lChar> chars;
+        auto add = [&](const char *n, quint32 a, A2lType t, double hi) {
+            A2lChar c; c.name = n; c.addr = a; c.type = t; c.hi = hi; chars.append(c);
+        };
+        add("CAL_motorCmd", 0x2140, A2lType::Uint32, 1);
+        add("CAL_motorManual", 0x2144, A2lType::Uint32, 1);
+        for (int i = 0; i < 4; ++i)
+            add(qPrintable(QString("CAL_motorManualSp_M%1").arg(i + 1)), 0x2148 + 2 * i, A2lType::Uint16, 2047);
+        add("CAL_motorSpMax", 0x2150, A2lType::Uint16, 2047);
+        view.setAvailable(meas);
+        view.setCharsAvailable(chars);
+    }
+    void readBackCeil(quint32 manual, quint32 ceil, bool fresh = true)
+    {
+        QMap<QString, quint32> v;
+        v["CAL_motorCmd"] = 1;
+        v["CAL_motorManual"] = manual;
+        for (int i = 1; i <= 4; ++i)
+            v[QString("CAL_motorManualSp_M%1").arg(i)] = 0;
+        v["CAL_motorSpMax"] = ceil;
+        view.onCharsRead(v, fresh);
+    }
+    QPushButton *ceilBtn() { return button("Set ceiling", true); }
+    QSpinBox *ceilSpin()
+    {
+        for (QSpinBox *b : view.findChildren<QSpinBox *>())
+            if (b->minimum() == kMotorDshotMin) return b;
+        return nullptr;
+    }
     void sample(int state)
     {
         XcpClient::Measurements m;
@@ -297,6 +334,128 @@ int main(int argc, char **argv)
         check("stale: DISARM and STOP ALL enabled",
               r.button("DISARM", true)->isEnabled() && r.button("STOP ALL", true)->isEnabled());
         check("stale: state banner says STALE", r.hasText("STALE"));
+    }
+
+    // 11. DShot ceiling (CAL_motorSpMax): range follows the read-back
+    {
+        Rig r;
+        r.addCeilingChar();
+        r.view.setConnected(true);
+        r.sample(2);
+        check("ceiling: read-back requested at connect", r.readBacks > 0);
+        r.readBackCeil(0, 1600);
+        check("ceiling 1600: label shows the firmware value", r.hasText("Ceiling (CAL_motorSpMax):") && r.hasText("1600"));
+        check("ceiling 1600: every slider maximum 1600, minimum still 47",
+              r.sliders().size() == 4 && r.sliders()[0]->maximum() == 1600 && r.sliders()[3]->maximum() == 1600
+                  && r.sliders()[0]->minimum() == kMotorSliderStop);
+        check("ceiling 1600: spinboxes follow", [&]() {
+            for (QSpinBox *b : r.view.findChildren<QSpinBox *>())
+                if (b->minimum() == kMotorSliderStop && b->maximum() != 1600) return false;
+            return true; }());
+        check("ceiling: editor starts at the value in force", r.ceilSpin() && r.ceilSpin()->value() == 1600);
+        // manual ON, link-all drag beyond the ceiling is impossible
+        r.button("Manual throttle")->click();
+        r.readBackCeil(0, 1600);
+        r.readBackCeil(1, 1600);
+        check("ceiling 1600: sliders enabled after manual handshake", r.slidersEnabled());
+        r.writes.clear();
+        r.view.findChild<QCheckBox *>()->setChecked(true);
+        r.sliders()[0]->setValue(2047);   // clamps to the maximum
+        wait(120);
+        check("ceiling 1600: link-all at the top writes 1600 on all four, never more",
+              r.writes.size() == 4 && [&]() { for (auto &w : r.writes) if (w.second != 1600) return false; return true; }());
+        // Set ceiling 2047: not believed until read back
+        r.writes.clear();
+        r.ceilSpin()->setValue(2047);
+        r.ceilBtn()->click();
+        check("ceiling: Set ceiling writes CAL_motorSpMax = 2047",
+              r.writes.size() == 1 && r.writes[0].first == "CAL_motorSpMax" && r.writes[0].second == 2047);
+        check("ceiling: range unchanged until the read-back", r.sliders()[0]->maximum() == 1600);
+        r.readBackCeil(1, 1600, false);   // stale reply: ignored
+        check("ceiling: stale reply does not confirm", r.sliders()[0]->maximum() == 1600 && r.hasText("pending"));
+        r.readBackCeil(1, 2047);
+        check("ceiling 2047: slider maximum 2047 after read-back", r.sliders()[0]->maximum() == 2047);
+        // request 1800, firmware keeps 2047: the read-back wins and the tab says so
+        r.ceilSpin()->setValue(1800);
+        r.ceilBtn()->click();
+        r.readBackCeil(1, 2047);
+        check("ceiling: firmware kept another value -> shown with a notice, range = firmware value",
+              r.sliders()[0]->maximum() == 2047 && r.hasText("not in force"));
+    }
+
+    // 11b. lowering the ceiling under a live slider rewrites the setpoint
+    {
+        Rig r;
+        r.addCeilingChar();
+        r.view.setConnected(true);
+        r.sample(2);
+        r.readBackCeil(0, 2047);
+        r.button("Manual throttle")->click();
+        r.readBackCeil(0, 2047);
+        r.readBackCeil(1, 2047);
+        r.sliders()[1]->setValue(1800);
+        wait(120);
+        r.writes.clear();
+        r.readBackCeil(1, 1600);
+        wait(120);
+        check("ceiling lowered under slider 1800: slider shows 1600", r.sliders()[1]->value() == 1600);
+        check("ceiling lowered under slider 1800: write of 1600 to M2",
+              r.countWrites("CAL_motorManualSp_M2") == 1 && r.writes.size() == 1 && r.writes[0].second == 1600);
+    }
+
+    // 11c. ceiling unknown / disconnect / unconfirmed
+    {
+        Rig r;
+        r.addCeilingChar();
+        r.view.setConnected(true);
+        r.sample(2);
+        QMap<QString, quint32> v;   // read-back without the ceiling
+        v["CAL_motorCmd"] = 1; v["CAL_motorManual"] = 0;
+        for (int i = 1; i <= 4; ++i) v[QString("CAL_motorManualSp_M%1").arg(i)] = 0;
+        r.view.onCharsRead(v);
+        check("ARMED, ceiling unknown: Manual and sliders not writable",
+              !r.button("Manual throttle")->isEnabled() && !r.slidersEnabled());
+        r.readBackCeil(0, 1600);
+        check("ceiling known: Manual writable", r.button("Manual throttle")->isEnabled());
+        r.view.setConnected(false);
+        r.view.setConnected(true);
+        r.sample(2);
+        check("reconnect: ceiling unknown again (label --, Manual not writable)",
+              r.hasText("Ceiling (CAL_motorSpMax): --") && !r.button("Manual throttle")->isEnabled());
+        r.readBackCeil(0, 1600);
+        r.ceilBtn()->click();
+        wait(1700);
+        r.sample(2);
+        check("no confirmation in 1.5 s: announced as not confirmed", r.hasText("not confirmed"));
+    }
+
+    // 12. ceiling write while DISARMED, and fallback without CAL_motorSpMax
+    {
+        Rig r;
+        r.addCeilingChar();
+        r.view.setConnected(true);
+        r.sample(0);
+        r.readBackCeil(0, 1600);
+        r.ceilSpin()->setValue(r.ceilSpin()->minimum());
+        r.ceilBtn()->click();
+        check("ceiling: 48 is writable (DISARMED is fine)", r.writes.size() == 1 && r.writes[0].second == 48);
+    }
+    {
+        Rig r;   // default Rig: A2L without CAL_motorSpMax
+        r.view.setConnected(true);
+        r.sample(2);
+        check("fallback: slider range 47..2047", r.sliders()[0]->maximum() == 2047);
+        check("fallback: ceiling button and spinbox disabled", r.ceilBtn() && !r.ceilBtn()->isEnabled()
+                                                               && r.ceilSpin() && !r.ceilSpin()->isEnabled());
+        check("fallback: tooltip names the cause", r.ceilBtn()->toolTip() == "firmware without CAL_motorSpMax");
+        r.writes.clear();
+        r.ceilBtn()->click();
+        check("fallback: clicking writes nothing", r.writes.isEmpty());
+        r.readBack(0);
+        r.button("Manual throttle")->click();
+        r.readBack(0, 0);
+        r.readBack(1, 0);
+        check("fallback: manual handshake works as before", r.slidersEnabled());
     }
 
     std::printf("%s\n", g_fail == 0 ? "[motor_view_selfcheck] PASS" : "[motor_view_selfcheck] FAIL");

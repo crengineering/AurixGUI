@@ -1886,6 +1886,11 @@ void XcpPanel::writeCalRow(int row)
         return;
     }
 
+    if (motorIsCeilingChar(c.name) && !motorCeilingValid(quint32(m_calTable->item(row, 3)->text().toUInt()))) {
+        m_log->appendPlainText(QString("[%1 must be 48..2047 - aborted]").arg(c.name));
+        return;
+    }
+
     m_client->writeMemory(c.addr, bytes);
 }
 
@@ -1930,6 +1935,10 @@ void XcpPanel::writeMotorChar(const QString &name, quint32 value)
     }
     if (name.startsWith(QLatin1String("CAL_motorManualSp_")) && !motorDshotWritable(value)) {
         m_log->appendPlainText(QString("[Motors: refused %1 = %2 (DShot 1..47 are commands)]").arg(name).arg(value));
+        return;
+    }
+    if (motorIsCeilingChar(name) && !motorCeilingValid(value)) {
+        m_log->appendPlainText(QString("[Motors: refused %1 = %2 (ceiling must be 48..2047)]").arg(name).arg(value));
         return;
     }
     // A setpoint still waiting in the queue is replaced, not followed by

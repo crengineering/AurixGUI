@@ -206,6 +206,24 @@ MotorView::MotorView(QWidget *parent)
     row2->addWidget(m_linkAll);
     row2->addWidget(m_hintLbl, 1);
 
+    // ---- third row: DShot throttle ceiling (CAL_motorSpMax) ---------------
+    m_ceilLbl = new QLabel;
+    m_ceilLbl->setFont(mono);
+    m_ceilLbl->setMinimumWidth(300);
+    m_ceilSpin = new NoWheelSpinBox;
+    m_ceilSpin->setRange(kMotorDshotMin, kMotorDshotMax);
+    m_ceilSpin->setValue(kMotorDshotMax);
+    m_ceilSpin->setKeyboardTracking(false);
+    m_ceilSpin->setFont(mono);
+    m_ceilSpin->setAlignment(Qt::AlignRight);
+    m_ceilSpin->setFocusPolicy(Qt::ClickFocus);
+    m_ceilBtn = new QPushButton(tr("Set ceiling"));
+    auto *row3 = new QHBoxLayout;
+    row3->addWidget(m_ceilLbl);
+    row3->addWidget(m_ceilSpin);
+    row3->addWidget(m_ceilBtn);
+    row3->addStretch(1);
+
     m_bindLbl = new QLabel;
     m_bindLbl->setWordWrap(true);
     m_bindLbl->setStyleSheet("QLabel { color: #c0392b; font-weight: bold; }");
@@ -321,6 +339,7 @@ MotorView::MotorView(QWidget *parent)
     auto *lay = new QVBoxLayout(content);
     lay->addLayout(top);
     lay->addLayout(row2);
+    lay->addLayout(row3);
     lay->addWidget(m_bindLbl);
     lay->addLayout(motorsRow, 1);
     lay->addWidget(m_rawBox);
@@ -341,6 +360,19 @@ MotorView::MotorView(QWidget *parent)
         emit disarmRequested();
     });
     connect(m_stopAllBtn, &QPushButton::clicked, this, &MotorView::onStopAll);
+    connect(m_ceilBtn,    &QPushButton::clicked, this, &MotorView::onSetCeiling);
+    m_ceilTimer.setSingleShot(true);
+    connect(&m_ceilTimer, &QTimer::timeout, this, [this]() {
+        if (m_ceilReq < 0)
+            return;
+        m_notice = tr("CAL_motorSpMax = %1 was not confirmed by read-back within 1.5 s - the ceiling in force is unknown.").arg(m_ceilReq);
+        emit logMessage(QStringLiteral("[Motors] ") + m_notice);
+        m_ceilReq = -1;
+        m_ceiling = -1;
+        applyRange();
+        updateControls();
+        emit readBackRequested();
+    });
     connect(m_manualBtn,  &QPushButton::clicked, this, [this]() { onManualClicked(m_manual != Manual::On); });
 
     m_flushTimer.setSingleShot(true);
@@ -351,7 +383,9 @@ MotorView::MotorView(QWidget *parent)
     m_staleTimer.start();
     m_pollTimer.setInterval(1000);
     connect(&m_pollTimer, &QTimer::timeout, this, [this]() {
-        if (m_connected && m_state == 2 && !isStale() && m_charsOk)
+        // 1 Hz while ARMED (manual state) and, with a ceiling in the A2L, in
+        // every state so a ceiling changed elsewhere is followed.
+        if (m_connected && !isStale() && m_charsOk && (m_state == 2 || m_ceilOk))
             emit readBackRequested();
     });
     m_pollTimer.start();
@@ -404,6 +438,11 @@ void MotorView::setCharsAvailable(const QVector<A2lChar> &chars)
     m_cmdOk = findChar(chars, QStringLiteral("CAL_motorCmd")) != nullptr;
     bool ok = m_cmdOk && findChar(chars, QStringLiteral("CAL_motorManual")) != nullptr;
     int spMax = kMotorDshotMax;
+    m_ceilOk = findChar(chars, QStringLiteral("CAL_motorSpMax")) != nullptr;
+    if (!m_ceilOk) {
+        m_ceiling = -1;
+        m_ceilReq = -1;
+    }
     for (int i = 0; i < kMotors; ++i) {
         const A2lChar *c = findChar(chars, spName(i));
         if (!c) { ok = false; continue; }
@@ -412,15 +451,118 @@ void MotorView::setCharsAvailable(const QVector<A2lChar> &chars)
             spMax = qMin(spMax, int(c->hi));
     }
     m_charsOk = ok;
-    m_spMax = spMax;
+    m_spHi = spMax;
+    applyRange();
+    updateControls();
+    updateBanner();
+}
+
+// Slider / spinbox maximum = min(A2L limit of the setpoints, firmware ceiling
+// read back). The STOP position (47) and the 48..max encoding are unchanged.
+// Without CAL_motorSpMax in the A2L, or before it is read back, the fixed A2L
+// range applies (the sliders stay disabled until the ceiling is known).
+void MotorView::applyRange()
+{
+    m_spMax = motorEffectiveMax(m_spHi, m_ceilOk ? m_ceiling : -1);
+    bool clamped = false;
     for (int i = 0; i < kMotors; ++i) {
         // setMaximum may clamp the value; that must never look like a user move.
+        const bool over = m_ui[i].slider->value() > m_spMax;
         const QSignalBlocker b1(m_ui[i].slider), b2(m_ui[i].spin);
         m_ui[i].slider->setMaximum(m_spMax);
         m_ui[i].spin->setMaximum(m_spMax);
+        // The firmware clamp never rewrites CAL_motorManualSp_Mn: while manual is
+        // ON, write the clamped position so the firmware holds what is shown
+        // (otherwise raising the ceiling later would put the old value on the wire).
+        if (over && m_manual == Manual::On && m_connected) {
+            m_pending[i] = m_spMax;
+            clamped = true;
+        }
     }
+    if (clamped && !m_flushTimer.isActive())
+        m_flushTimer.start();
+    // A queued slider position above a lowered ceiling is clamped, never sent.
+    for (int &p : m_pending)
+        if (p > m_spMax)
+            p = m_spMax;
+    updateCeilingUi();
+}
+
+void MotorView::updateCeilingUi()
+{
+    if (!m_ceilLbl)
+        return;
+    const bool usable = m_ceilOk && m_connected && !isStale();
+    if (!m_ceilOk) {
+        m_ceilLbl->setText(tr("Ceiling (CAL_motorSpMax): n/a"));
+        m_ceilLbl->setStyleSheet(QStringLiteral("QLabel { color: %1; }").arg(kColGrey.name()));
+    } else if (m_ceilReq >= 0) {
+        m_ceilLbl->setText(tr("Ceiling (CAL_motorSpMax): pending..."));
+        m_ceilLbl->setStyleSheet(QStringLiteral("QLabel { font-style: italic; }"));
+    } else if (m_ceiling < 0 || isStale()) {
+        m_ceilLbl->setText(tr("Ceiling (CAL_motorSpMax): --"));
+        m_ceilLbl->setStyleSheet(QStringLiteral("QLabel { color: %1; }").arg(kColGrey.name()));
+    } else {
+        m_ceilLbl->setText(tr("Ceiling (CAL_motorSpMax): %1").arg(m_ceiling, 4));
+        m_ceilLbl->setStyleSheet(m_ceiling >= kMotorDshotMax
+                                     ? QStringLiteral("QLabel { color: %1; font-weight: bold; }").arg(kColAmber.name())
+                                     : QString());
+    }
+    const QString na = tr("firmware without CAL_motorSpMax");
+    m_ceilSpin->setEnabled(usable);
+    m_ceilBtn->setEnabled(usable && m_ceilReq < 0);
+    m_ceilSpin->setToolTip(m_ceilOk ? tr("Requested ceiling, 48..2047 (default after reset: 1600). Press \"Set ceiling\" to write.") : na);
+    m_ceilLbl->setToolTip(m_ceilOk ? tr("Firmware read-back of CAL_motorSpMax: the DShot throttle ceiling applied to every setpoint source. "
+                                        "Default 1600 after every reset (flight ceiling, 50 A criterion); raise to 2047 for thrust-rig runs only.")
+                                   : na);
+    m_ceilBtn->setToolTip(m_ceilOk ? tr("Write CAL_motorSpMax. The tab shows the firmware's read-back, not the requested value.") : na);
+}
+
+void MotorView::onSetCeiling()
+{
+    const int v = m_ceilSpin->value();
+    // Write entry point: independent of the widget range.
+    if (!m_connected || !m_ceilOk || m_ceilReq >= 0 || !motorCeilingValid(quint32(v)))
+        return;
+    m_notice.clear();
+    m_ceilReq = v;
+    m_ceilTimer.start(1500);
+    emit logMessage(QStringLiteral("[Motors] set ceiling CAL_motorSpMax = %1 requested").arg(v));
+    emit writeCharRequested(QStringLiteral("CAL_motorSpMax"), quint32(v));
+    updateCeilingUi();
     updateControls();
-    updateBanner();
+}
+
+// Read-back of CAL_motorSpMax. Only the firmware's value is ever shown and
+// used for the range, never our own request.
+void MotorView::applyCeiling(quint32 value, bool fresh)
+{
+    if (!m_ceilOk)
+        return;
+    const bool valid = motorCeilingValid(value);
+    const int newCeil = valid ? int(value) : -1;
+    if (m_ceilReq >= 0) {
+        if (!fresh)
+            return;             // a reply to a read issued before our write says nothing about it
+        const int req = m_ceilReq;
+        m_ceilReq = -1;
+        m_ceilTimer.stop();
+        if (newCeil == req) {
+            m_notice.clear();
+            emit logMessage(QStringLiteral("[Motors] ceiling confirmed by read-back: CAL_motorSpMax = %1").arg(req));
+        } else {
+            m_notice = tr("Ceiling request %1 not in force: the firmware reads back %2.")
+                           .arg(req).arg(valid ? QString::number(newCeil) : tr("an invalid value"));
+            emit logMessage(QStringLiteral("[Motors] ") + m_notice);
+        }
+    } else if (newCeil != m_ceiling && m_ceiling >= 0 && valid) {
+        emit logMessage(QStringLiteral("[Motors] CAL_motorSpMax read back %1 (was %2) - following the firmware")
+                            .arg(newCeil).arg(m_ceiling));
+    }
+    if (newCeil != m_ceiling && valid)
+        m_ceilSpin->setValue(newCeil);   // start the editor at the value in force
+    m_ceiling = newCeil;
+    applyRange();
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +574,10 @@ void MotorView::setConnected(bool connected)
     m_connected = connected;
     m_haveSample = false;
     m_state = -1;
+    m_ceiling = -1;                 // a new connection: the firmware may have reset
+    m_ceilReq = -1;
+    m_ceilTimer.stop();
+    applyRange();
     if (!connected) {
         // Link gone: firmware goes FAILSAFE and zeroes its side; we just reset ours.
         resetManualUi();
@@ -499,6 +645,8 @@ void MotorView::feedSample(const XcpClient::Measurements &m)
     } else if (m_state == 2 && (prevState != 2 || m_manual == Manual::Unknown) && m_charsOk) {
         emit readBackRequested();   // learn CAL_motorManual / Sp now, not in up to 1 s
     }
+    if (m_ceilOk && m_ceiling < 0 && m_ceilReq < 0 && m_charsOk)
+        emit readBackRequested();   // learn the ceiling at connect, not in up to 1 s
 
     for (int i = 0; i < kMotors; ++i) {
         const MotorIdx &x = m_idx[i];
@@ -606,7 +754,8 @@ void MotorView::showReadoutsStale()
 
 bool MotorView::manualWritable() const
 {
-    return m_connected && m_charsOk && m_readBackProblem.isEmpty() && !isStale() && m_state == 2;
+    return m_connected && m_charsOk && m_readBackProblem.isEmpty() && !isStale() && m_state == 2
+        && (!m_ceilOk || m_ceiling >= 0);
 }
 
 bool MotorView::slidersEnabled() const
@@ -627,6 +776,8 @@ QString MotorView::disabledReason() const
         return tr("STALE: no ESC sample in the last 1.5 s - manual state unknown, sliders off. DISARM / STOP ALL still work.");
     if (m_state != 2)
         return tr("Arm first (state is %1).").arg(motorStateName(m_state));
+    if (m_ceilOk && m_ceiling < 0)
+        return tr("Waiting for the CAL_motorSpMax read-back (throttle ceiling unknown).");
     if (m_locked)
         return tr("DISARM sent - waiting for the controller to confirm.");
     if (m_pendingOp == Pending::AwaitZeros)
@@ -648,6 +799,7 @@ void MotorView::updateControls()
     m_disarmBtn->setEnabled(m_connected && m_cmdOk);
     m_stopAllBtn->setEnabled(m_connected && m_charsOk);
     m_manualBtn->setEnabled(manualWritable() && m_pendingOp == Pending::None && !m_locked);
+    updateCeilingUi();
 
     const bool sliders = slidersEnabled();
     m_linkAll->setEnabled(sliders);
@@ -660,7 +812,8 @@ void MotorView::updateControls()
 
     const QString why = disabledReason();
     QString text = why.isEmpty()
-        ? tr("Manual throttle active: sliders write CAL_motorManualSp_Mn (0 = stop, 48..%1).").arg(m_spMax)
+        ? tr("Manual throttle active: sliders write CAL_motorManualSp_Mn (0 = stop, 48..%1%2).")
+              .arg(m_spMax).arg(m_ceilOk ? tr(", firmware ceiling") : QString())
         : why;
     if (!m_notice.isEmpty())
         text = m_notice + QStringLiteral("  ") + text;
@@ -865,6 +1018,10 @@ void MotorView::setReadBackProblem(const QString &reason)
 
 void MotorView::onCharsRead(const QMap<QString, quint32> &v, bool fresh)
 {
+    if (m_connected && v.contains(QStringLiteral("CAL_motorSpMax"))) {
+        applyCeiling(v.value(QStringLiteral("CAL_motorSpMax")), fresh);
+        updateControls();
+    }
     if (!m_connected || m_state != 2 || !v.contains(QStringLiteral("CAL_motorManual")))
         return;
     const bool man = v.value(QStringLiteral("CAL_motorManual")) == 1u;
