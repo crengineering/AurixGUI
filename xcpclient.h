@@ -5,6 +5,7 @@
 #include <QUdpSocket>
 #include <QHostAddress>
 #include <QQueue>
+#include <QSet>
 #include <QVector>
 #include <QPair>
 
@@ -112,7 +113,16 @@ public:
     // blocks exist -- it just moves their bytes in MAX_CTO-sized chunks.
     void pollMeasurements(const QVector<Block> &blocks);
     void readMemory(quint32 address, quint8 len);     // -> memoryRead()
-    void writeMemory(quint32 address, const QByteArray &data); // -> memoryWritten()
+    // Normal = append to the FIFO. Coalesce = if a write to the same address
+    // is still queued (not in flight), replace its payload instead of
+    // appending. Priority = place at the head of the queue, right after the
+    // request that is already in flight (used for DISARM / STOP ALL).
+    enum class WriteMode { Normal, Coalesce, Priority };
+    // Returns false when nothing was enqueued (not connected / bad size).
+    bool writeMemory(quint32 address, const QByteArray &data,
+                     WriteMode mode = WriteMode::Normal); // -> memoryWritten()
+    // Drop queued (not in-flight) writes to these addresses.
+    void purgeWrites(const QSet<quint32> &addresses);
 
     // Configure and start the DAQ list (event channel 0, 100 ms on the board).
     // The block exceeds the 63-byte MAX_DTO, so it is split across
@@ -134,6 +144,7 @@ signals:
     void measurementsReceived(const XcpClient::Measurements &m);
     void memoryRead(quint32 address, const QByteArray &data);
     void memoryWritten(quint32 address);
+    void memoryReadFailed(quint32 address);   // the board answered a SHORT_UPLOAD with an error
     void daqStarted();
     void daqFailed();
     void errorOccurred(const QString &message);
@@ -141,10 +152,12 @@ signals:
 private slots:
     void onReadyRead();
     void onTimeout();
+    void onKeepaliveTimer();
 
 private:
+    friend struct XcpClientTestAccess;   // host self-check drives the queue without a socket
     enum class ReqType { Connect, GetId, UploadId, PollChunk,
-                         MemRead, MemWrite, DaqCmd, DaqStart };
+                         MemRead, MemWrite, DaqCmd, DaqStart, GetStatus };
     struct Request {
         ReqType    type;
         QByteArray packet;
@@ -185,8 +198,9 @@ private:
     // Adopt a block set and size the receive buffers to it.
     void setBlocks(const QVector<Block> &blocks);
 
-    QUdpSocket     *m_socket  = nullptr;
-    QTimer         *m_timeout = nullptr;
+    QUdpSocket     *m_socket    = nullptr;
+    QTimer         *m_timeout   = nullptr;
+    QTimer         *m_keepalive = nullptr;
     QHostAddress    m_host;
     quint16         m_port     = 5555;
     quint16         m_ctr      = 0;

@@ -3,10 +3,15 @@
 
 #include <QWidget>
 #include <QElapsedTimer>
+#include <QMap>
+#include <QQueue>
+#include "motorproto.h"
+#include <QSet>
 #include <QVector>
 #include "xcpclient.h"
 #include "mf4writer.h"
 #include "a2lmodel.h"
+#include "diagmath.h"
 #include <QJsonObject>
 
 class QLineEdit;
@@ -22,6 +27,8 @@ class PlotWidget;
 class PlotPane;
 class QGridLayout;
 class AttitudeView;
+class MotorView;
+class PositionView;
 
 // "Ethernet" tab: connects to the XCP slave on the TC399. Contains
 // three sub-tabs: live measurements, diagnostics interpretation (bitmask
@@ -33,9 +40,25 @@ class XcpPanel : public QWidget
 public:
     explicit XcpPanel(QWidget *parent = nullptr);
 
+public slots:
+    // Driven by SystemFooter's ARM/DISARM buttons. Both resolve CAL_motorCmd
+    // against the loaded A2L by name and write it like any other
+    // characteristic - errors and the confirming read-back go through the
+    // same onMemoryWritten()/onError() every Calibration tab write uses.
+    void armMotors();
+    void disarmMotors();
+    void stopAllMotors();
+    void readMotorBack();
+    // Driven by the Motors tab (CAL_motor* writes only; see .cpp).
+    void writeMotorChar(const QString &name, quint32 value);
+
 signals:
     void connectionChanged(bool connected);   // drives the tab lamp icon
     void measurementsUpdated(const XcpClient::Measurements &m);  // -> SystemFooter
+    void a2lLoaded(const QVector<A2lMeas> &meas);  // -> SystemFooter (Actuators lamps)
+    // fresh = the read was issued after the last CAL_motor* write was enqueued
+    void motorCharsRead(const QMap<QString, quint32> &values, bool fresh);  // -> Motors tab (read-back, by name)
+    void a2lCharsLoaded(const QVector<A2lChar> &chars);  // -> SystemFooter (ARM/DISARM)
 
 private slots:
     void toggleConnection();
@@ -69,11 +92,13 @@ private:
     QWidget *buildNvmTab();
     QWidget *buildPlotTab();
     QWidget *buildAttitudeTab();
+    QWidget *buildMotorsTab();
     void     setConnectedState(bool connected);
+    void     updateMotorReadBackState();
     int      measurementBlockSize() const;  // Xcp_Data bytes the A2L describes
     // Every measurement block the A2L describes, not just Xcp_Data.
     QVector<XcpClient::Block> measurementBlocks() const;
-    void     updateDiagTable(quint32 status);
+    void     updateDiagTable(const XcpClient::Measurements &m);
     void     updateLogStatus();
     bool     chooseLogChannels(QVector<int> *out);   // pre-log channel picker
 
@@ -113,18 +138,36 @@ private:
     QLabel         *m_imuTempLbl   = nullptr;   // ICM-42688-P die temperature
     QPlainTextEdit *m_log        = nullptr;
 
-    // diagnostics tab
+    // diagnostics tab -- one section per diagnostic word (SWE1-GUI-005
+    // amendment, 2026-09-15: firmware >= 1.19.30 added a second word, NavDiag
+    // at the Xcp_Fusion tail, once diagStatus filled up at 32/32 bits).
+    // Sections are rebuilt from the A2L's BIT_MASK measurements grouped by
+    // buildDiagWordGroups() (diagmath.h), same "read whichever the loaded
+    // A2L actually describes" rule the Sensors tab and the plot picker
+    // already follow -- never a hardcoded single word.
     QLabel         *m_diagLamp    = nullptr;  // green = all good, red = error
-    QLabel         *m_diagWordLbl = nullptr;
-    QLabel         *m_diagSummary = nullptr;
-    QTableWidget   *m_diagTable   = nullptr;
-    quint32         m_lastStatus  = 0;
-    bool            m_haveStatus  = false;
+    QLabel         *m_diagSummary = nullptr;  // combined across every word
+    struct DiagWordUi {
+        DiagWordGroup group;                  // rows + addr + label + wordMeas
+        QLabel        *wordLbl   = nullptr;   // "<label>: 0x........"
+        QTableWidget  *table     = nullptr;
+        quint32        lastValue = 0;
+        bool           haveValue = false;
+    };
+    QVector<DiagWordUi> m_diagWords;
+    QWidget        *m_diagWordsPage = nullptr;  // filled by rebuildDiagTable()
 
     // calibration tab (RAM working page: individual writes, global read).
     // Rows are built from the A2L CHARACTERISTIC list (NVM block excluded);
     // row index == index into m_chars.
     void            writeCalRow(int row);
+    // Look up a CHARACTERISTIC by name in m_chars and write it. Shared by
+    // writeCalRow() (kept as-is, it writes the row's edited text) and
+    // armMotors()/disarmMotors(), which write a fixed value instead of a
+    // table cell. Logs and aborts if the A2L does not describe the name.
+    bool            writeCharByName(const QString &name, quint32 value,
+                                    XcpClient::WriteMode mode = XcpClient::WriteMode::Normal);
+    bool            handleMotorRead(quint32 address, const QByteArray &data);
     void            loadA2l(const QString &path, bool remember);
     QWidget        *buildSensorsTab();
     void            rebuildDiagTable();
@@ -144,7 +187,7 @@ private:
     void            rebuildSensorsTab();
     void            updateSensorValues(const XcpClient::Measurements &m);
     void            rebuildCalTable();
-    bool            populateCharsFromRead(quint32 base, const QByteArray &data);
+    bool            populateCharsFromRead(quint32 base, const QByteArray &data, bool quiet = false);
     QString         defaultA2lPath() const;
     QVector<A2lChar> m_chars;
     QString         m_a2lPath;
@@ -152,13 +195,15 @@ private:
     // Sensors tab: built from the A2L MEASUREMENT list, grouped by name
     // prefix. m_sensorVal[i] is the value label for m_meas[i], so a new
     // MEASUREMENT in the A2L needs no GUI change at all.
-    // Diagnostics rows, built from the A2L BIT_MASK measurements.
-    struct DiagRow { int bit; QString text; };
-    QVector<DiagRow> m_diagRows;
     int              m_diagTabIndex = -1;
 
     QVector<A2lMeas> m_meas;
     QVector<QLabel*> m_sensorVal;
+    // Sensors tab, ESC rpm comparison box: per motor, indices into m_meas
+    // (-1 = not in the A2L) and the value labels. Columns: DShot command,
+    // KISS rpm, KISS eRPM, bidir rpm, bidir eRPM, bidir OK count.
+    struct EscCmpRow { int idx[6] = { -1, -1, -1, -1, -1, -1 }; QLabel *lbl[6] = {}; };
+    EscCmpRow        m_escCmp[4];
     QWidget         *m_sensorsPage   = nullptr;
     QLabel          *m_sensorsStatus = nullptr;
     QLabel         *m_a2lStatus    = nullptr;
@@ -200,6 +245,16 @@ private:
     // its own signal selection and series; none exist until "Add plot".
     QVector<PlotPane *>  m_plotPanes;
     AttitudeView        *m_attitudeView = nullptr;   // "Attitude" sub-tab (SYS1-015)
+    MotorView           *m_motorView    = nullptr;   // "Motors" sub-tab
+    QTimer              *m_motorSpReadTimer = nullptr;   // 200 ms after the last Sp write
+    QElapsedTimer        m_motorReadClock;
+    MotorReadTags        m_motorReadTags;               // write-seq at issue time, one per read in flight
+    quint32              m_motorWriteSeq = 0;           // bumped by every CAL_motor* write enqueued
+    quint32              m_motorLastReadSeq = 0;
+    bool                 m_motorSpanLogged = false;
+    QElapsedTimer        m_disarmClock;                  // kill-latency evidence
+    bool                 m_disarmPending = false;
+    PositionView        *m_positionView = nullptr;   // right half of "Attitude" tab (SYS1-016)
     QWidget             *m_plotGridHost = nullptr;
     QGridLayout         *m_plotGrid     = nullptr;
     QPushButton         *m_addPlotBtn   = nullptr;

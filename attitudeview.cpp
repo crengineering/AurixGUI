@@ -9,6 +9,7 @@
 #include <QFormLayout>
 #include <QFont>
 #include <QDateTime>
+#include <QSettings>
 #include <QDebug>
 #include <QtMath>
 #include <cmath>
@@ -127,16 +128,41 @@ AttitudeView::AttitudeView(QWidget *parent)
     auto *form = new QFormLayout(readoutBox);
     form->addRow("Roll:",  m_rollLbl);
     form->addRow("Pitch:", m_pitchLbl);
-    form->addRow("Yaw:",   m_yawLbl);
+    m_alignLbl = new QLabel;
+    m_alignLbl->setStyleSheet("QLabel { color: #b9770e; font-weight: bold; }");
+    m_alignLbl->setToolTip("The 3D model is pre-rotated about the vertical by this offset "
+                           "(SWE1-GUI-012). View only: the numbers and the board are unchanged.");
+    m_alignLbl->setVisible(false);
+    auto *yawCol = new QVBoxLayout;
+    yawCol->setSpacing(0);
+    yawCol->setContentsMargins(0, 0, 0, 0);
+    yawCol->addWidget(m_yawLbl);
+    yawCol->addWidget(m_alignLbl);
+    form->addRow("Yaw:",   yawCol);
     form->addRow("State:", m_stateLbl);
     form->addRow("Cross-check:", m_crossCheckLbl);
 
     m_resetViewBtn = new QPushButton("Reset view");
     connect(m_resetViewBtn, &QPushButton::clicked, m_gl, &AttitudeGLWidget::resetView);
 
+    m_alignYawBtn = new QPushButton("Align yaw");
+    m_alignYawBtn->setToolTip("Take the board's current heading as 'toward the screen': the 3D model is "
+                              "rotated about the vertical by that offset. View only - nothing is written "
+                              "to the board. Remembered across restarts.");
+    m_clearAlignBtn = new QPushButton("Clear");
+    m_clearAlignBtn->setToolTip("Remove the yaw alignment (north-up rendering).");
+    m_clearAlignBtn->setEnabled(false);
+    connect(m_alignYawBtn,   &QPushButton::clicked, this, &AttitudeView::alignYaw);
+    connect(m_clearAlignBtn, &QPushButton::clicked, this, &AttitudeView::clearAlign);
+
+    auto *alignRow = new QHBoxLayout;
+    alignRow->addWidget(m_alignYawBtn);
+    alignRow->addWidget(m_clearAlignBtn);
+
     auto *side = new QVBoxLayout;
     side->addWidget(readoutBox);
     side->addWidget(m_resetViewBtn);
+    side->addLayout(alignRow);
     side->addStretch(1);
 
     auto *sideWidget = new QWidget;
@@ -171,6 +197,48 @@ AttitudeView::AttitudeView(QWidget *parent)
 
     updateBoundState();
     resetCrossCheck();
+    m_haveLastQuat = false;
+
+    // SWE1-GUI-012: restore the stored alignment; a missing or non-finite
+    // value is ignored (treated as cleared).
+    {
+        QSettings settings;
+        bool ok = false;
+        const double psi0 = settings.value("attitude/yawAlignDeg").toDouble(&ok);
+        applyAlign(settings.contains("attitude/yawAlignDeg") && ok && std::isfinite(psi0) && std::abs(psi0) <= 360.0, psi0);
+    }
+}
+
+void AttitudeView::applyAlign(bool active, double psi0Deg)
+{
+    m_alignActive = active;
+    m_alignPsi0   = active ? psi0Deg : 0.0;
+    if (m_gl)
+        m_gl->setYawOffsetDeg(m_alignPsi0);
+    m_alignLbl->setVisible(active);
+    if (active)
+        m_alignLbl->setText(QString("view aligned %1°").arg(qRound(-m_alignPsi0)));
+    m_clearAlignBtn->setEnabled(active);
+}
+
+void AttitudeView::alignYaw()
+{
+    if (!m_haveLastQuat || !m_connected) {
+        m_stateLbl->setText("Align yaw: needs a live attitude sample (connect first)");
+        return;
+    }
+    const QQuaternion q(m_lastQuat[0], m_lastQuat[1], m_lastQuat[2], m_lastQuat[3]);
+    const double psi0 = attitudeQuaternionYawDeg(q);
+    if (!std::isfinite(psi0))
+        return;
+    applyAlign(true, psi0);
+    QSettings().setValue("attitude/yawAlignDeg", psi0);
+}
+
+void AttitudeView::clearAlign()
+{
+    applyAlign(false, 0.0);
+    QSettings().remove("attitude/yawAlignDeg");
 }
 
 void AttitudeView::setAvailable(const QVector<A2lMeas> &meas)
@@ -185,6 +253,7 @@ void AttitudeView::setAvailable(const QVector<A2lMeas> &meas)
     m_idxYaw   = indexOfMeas(meas, "AttYaw");
     m_idxState = indexOfMeas(meas, "AttState");
 
+    m_haveLastQuat = false;   // A2L reload: previous pose must not feed Align
     m_bound = m_idxQuat[0] >= 0 && m_idxQuat[1] >= 0 && m_idxQuat[2] >= 0 && m_idxQuat[3] >= 0;
     updateBoundState();
     // A (possibly different) A2L may resolve AttRoll/AttPitch to different
@@ -219,8 +288,10 @@ void AttitudeView::setConnected(bool connected)
     // false -> true: a fresh session on (potentially) a different board or
     // after a reflash -- a mismatch counted against the previous session
     // must not silently keep showing as evidence about this one.
-    if (connected && !m_connected)
+    if (connected && !m_connected) {
         resetCrossCheck();
+        m_haveLastQuat = false;
+    }
 
     m_connected = connected;
     if (!connected) {
@@ -266,6 +337,13 @@ void AttitudeView::feedSample(const XcpClient::Measurements &m)
         m_gl->setLive(live);
         if (live)
             m_gl->pushQuaternion(w, x, y, z);
+        // Align yaw may only use a sample the renderer also accepts: live and
+        // within the same norm gate as pushQuaternion().
+        const float n = std::sqrt(w * w + x * x + y * y + z * z);
+        if (live && n >= 0.5f && n <= 1.5f) {
+            m_lastQuat[0] = w / n; m_lastQuat[1] = x / n; m_lastQuat[2] = y / n; m_lastQuat[3] = z / n;
+            m_haveLastQuat = true;
+        }
     }
 
     double roll = 0.0, pitch = 0.0, yaw = 0.0;

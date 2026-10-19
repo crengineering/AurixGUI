@@ -7,6 +7,7 @@
 namespace {
 constexpr quint8 CMD_CONNECT        = 0xFF;
 constexpr quint8 CMD_DISCONNECT     = 0xFE;
+constexpr quint8 CMD_GET_STATUS     = 0xFD;
 constexpr quint8 CMD_GET_ID         = 0xFA;
 constexpr quint8 CMD_UPLOAD         = 0xF5;
 constexpr quint8 CMD_SHORT_UPLOAD   = 0xF4;
@@ -38,6 +39,14 @@ constexpr int     XCP_IMU_SIZE = 32;            // present u8 (+3 pad) + 7 float
 constexpr int     XCP_SYS_SIZE = 56;            // 6xu32 + 6xu16 + 6xu16 + eth
 
 constexpr int     TIMEOUT_MS     = 500;
+
+// GET_STATUS heartbeat while connected. The firmware's arming state machine
+// (Xcp_linkAlive(), Xcp.c) declares the link dead after XCP_LINK_TIMEOUT_MS
+// (500 ms) without a well-formed command; DAQ streaming alone sends nothing
+// master->slave, so without this the board falls into FAILSAFE even though
+// the GUI is happily receiving DTOs. Must stay well below the firmware's
+// 500 ms timeout so one lost datagram cannot starve it.
+constexpr int     KEEPALIVE_MS   = 200;
 }
 
 XcpClient::XcpClient(QObject *parent)
@@ -50,6 +59,13 @@ XcpClient::XcpClient(QObject *parent)
     m_timeout->setSingleShot(true);
     m_timeout->setInterval(TIMEOUT_MS);
     connect(m_timeout, &QTimer::timeout, this, &XcpClient::onTimeout);
+
+    // Keeps the firmware's link-alive timestamp fresh while connected -- see
+    // KEEPALIVE_MS above. Only running between a successful CONNECT and the
+    // next DISCONNECT/timeout.
+    m_keepalive = new QTimer(this);
+    m_keepalive->setInterval(KEEPALIVE_MS);
+    connect(m_keepalive, &QTimer::timeout, this, &XcpClient::onKeepaliveTimer);
 }
 
 void XcpClient::connectToSlave(const QString &host, quint16 port)
@@ -84,6 +100,7 @@ void XcpClient::disconnectFromSlave()
     }
 
     m_timeout->stop();
+    m_keepalive->stop();
     m_queue.clear();
     m_busy      = false;
     m_connected = false;
@@ -168,17 +185,40 @@ void XcpClient::readMemory(quint32 address, quint8 len)
     enqueue({ReqType::MemRead, cmd, address});
 }
 
-void XcpClient::writeMemory(quint32 address, const QByteArray &data)
+bool XcpClient::writeMemory(quint32 address, const QByteArray &data, WriteMode mode)
 {
     if (!m_connected || data.isEmpty() || data.size() > 56)
-        return;
+        return false;
 
     QByteArray cmd(8, '\0');
     cmd[0] = char(CMD_SHORT_DOWNLOAD);
     cmd[1] = char(quint8(data.size()));
     qToLittleEndian<quint32>(address, cmd.data() + 4);
     cmd += data;
+
+    if (mode == WriteMode::Coalesce) {
+        for (Request &r : m_queue) {
+            if (r.type == ReqType::MemWrite && r.addr == address) {
+                r.packet = cmd;          // newest value wins, queue does not grow
+                return true;
+            }
+        }
+    }
+    if (mode == WriteMode::Priority) {
+        m_queue.prepend({ReqType::MemWrite, cmd, address});
+        if (!m_busy)
+            sendNext();
+        return true;
+    }
     enqueue({ReqType::MemWrite, cmd, address});
+    return true;
+}
+
+void XcpClient::purgeWrites(const QSet<quint32> &addresses)
+{
+    for (int i = m_queue.size() - 1; i >= 0; --i)
+        if (m_queue[i].type == ReqType::MemWrite && addresses.contains(m_queue[i].addr))
+            m_queue.removeAt(i);
 }
 
 void XcpClient::startDaq(const QVector<Block> &blocks)
@@ -451,6 +491,8 @@ void XcpClient::handleResponse(const QByteArray &packet)
             dropConnection("Connection setup failed");
             return;
         }
+        if (m_current.type == ReqType::MemRead)
+            emit memoryReadFailed(m_current.addr);
         if (m_current.type == ReqType::DaqCmd || m_current.type == ReqType::DaqStart) {
             // abort the remaining setup steps, panel falls back to polling
             QQueue<Request> keep;
@@ -486,12 +528,14 @@ void XcpClient::handleResponse(const QByteArray &packet)
             enqueue({ReqType::UploadId, up, 0});
         } else {
             m_connected = true;
+            m_keepalive->start();
             emit connected(QString());
         }
         break;
 
     case ReqType::UploadId:
         m_connected = true;
+        m_keepalive->start();
         emit connected(QString::fromLatin1(packet.mid(1, int(m_identLen))));
         break;
 
@@ -520,6 +564,9 @@ void XcpClient::handleResponse(const QByteArray &packet)
     case ReqType::DaqCmd:
         break;                                   // intermediate setup step
 
+    case ReqType::GetStatus:
+        break;                                   // keepalive only, nothing to do
+
     case ReqType::DaqStart:
         m_daqActive = true;
         emit daqStarted();
@@ -527,6 +574,24 @@ void XcpClient::handleResponse(const QByteArray &packet)
     }
 
     sendNext();
+}
+
+void XcpClient::onKeepaliveTimer()
+{
+    if (!m_connected)
+        return;
+
+    // Never let keepalives pile up behind a slow link, same guard as
+    // pollMeasurements(): one in flight is enough, a queue of them would just
+    // delay the real DAQ/cal traffic behind it.
+    for (const Request &r : m_queue)
+        if (r.type == ReqType::GetStatus)
+            return;
+    if (m_busy && m_current.type == ReqType::GetStatus)
+        return;
+
+    QByteArray cmd(1, char(CMD_GET_STATUS));
+    enqueue({ReqType::GetStatus, cmd, 0});
 }
 
 void XcpClient::onTimeout()
@@ -538,6 +603,7 @@ void XcpClient::onTimeout()
 void XcpClient::dropConnection(const QString &reason)
 {
     m_timeout->stop();
+    m_keepalive->stop();
     m_queue.clear();
     m_busy      = false;
     m_connected = false;

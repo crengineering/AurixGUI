@@ -1,6 +1,6 @@
 # AurixGUI — Measurement and Calibration Frontend
 
-**ASPICE:** SWE.2 — software architecture/overview, GUI domain · realizes SYS2-COM-001 (groundstation, SYS1-008) → SWE1-GUI-005 (DFLASH tab A2L-driven) and SYS1-015 → SYS2-GUI-001/SYS2-GUI-002 → SWE1-GUI-001..004 (3D attitude view) · process: QuadSE/requirements/README.md
+**ASPICE:** SWE.2 — software architecture/overview, GUI domain · realizes SYS2-COM-001 (groundstation, SYS1-008) → SWE1-GUI-005 (DFLASH tab A2L-driven), SYS1-015 → SYS2-GUI-001/SYS2-GUI-002 → SWE1-GUI-001..004/SWE1-GUI-012 (3D attitude view, yaw alignment) and SYS1-016 → SYS2-GUI-003 → SWE1-GUI-006/SWE1-GUI-007 (position panel beside it), SYS1-005/SYS1-012 → SYS2-ACT-001/SYS2-SAF-001 → SWE1-GUI-011 (Motors tab) · process: QuadSE/requirements/README.md
 
 A C++/Qt6 desktop frontend for an AURIX TC399 ECU: watch measurements live,
 calibrate parameters, read diagnostics, plot signals and record them as MF4 —
@@ -14,6 +14,16 @@ the firmware is nothing more than a new A2L entry here.
 > documented and maintained in the ECU repository:**
 > **[crengineering/AurixTricore](https://github.com/crengineering/AurixTricore)**
 
+![Attitude tab: 3D quadrocopter model over a ground grid following the board's live attitude, roll/pitch/yaw readout, and beside it the Position panel with north/east trail, altitude bar and anchoring readouts](docs/img/attitude-tab.png)
+
+*Attitude tab with the board on the desk (fw 1.19.28). The 3D model follows
+the firmware's quaternion, the readout is the plotted roll/pitch/yaw, and the
+view is yaw-aligned to the desk (−6°, view-only — the firmware's yaw is
+untouched). Beside it the Position panel: N/E trail, altitude bar and the two
+anchoring readouts — vertical anchored by the barometer, horizontal held
+because there is no GNSS fix indoors. The footer carries the core loads, the
+link rate, the sensor lamps and the actuator state.*
+
 ---
 
 ## Features
@@ -24,11 +34,12 @@ the firmware is nothing more than a new A2L entry here.
 | **Ethernet** | XCP connection to the ECU, A2L loading, connection status |
 | **Live Data** | System overview, cyclically polled: software version, uptime, die temperatures (DTS/DTSC), supply rails (1.25 V / 3.3 V / 5 V), base measurements |
 | **Sensors** | Sensor values grouped by device — IMU (ICM-42688-P), barometer (BMP581), magnetometer (MMC5983MA), GNSS (NEO-M9N). The tab is built at runtime from the loaded A2L |
-| **Diagnostics** | Diagnostic bits as a table, decoded from the A2L description |
+| **Diagnostics** | Diagnostic bits as a table, one section per A2L diagnostic word (e.g. `diagStatus`, `NavDiag`) — a new word in the firmware appears as a new section, nothing hardcoded |
 | **Calibration** | Read and write calibration values (RAM block) |
 | **DFLASH** | Read, write and verify persistent parameters — every A2L CHARACTERISTIC inside the Xcp_Nvm block, built at runtime like the Calibration tab |
 | **Plot & Log** | Freely configurable plots, channel selection, recording as **MF4** |
-| **Attitude** | 3D quadrocopter model driven by the firmware's `AttQuat0..3` body-to-NED quaternion (OpenGL); ground grid, N/E/D triad, mouse orbit/zoom, roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`; stale/disconnected pose is shown desaturated, never as live |
+| **Attitude** | 3D quadrocopter model (OpenGL) driven by the firmware's body-to-NED quaternion `AttQuat0..3`: ground grid, N/E/D triad, mouse orbit/zoom, a roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`. *Align yaw* takes the board's current heading as "toward the screen" so the model on screen turns like the board on the desk — a view-only rotation, the readout, XCP and MF4 stay untouched. A stale or disconnected pose is drawn desaturated, never as live. Beside it a **Position** panel: top-down N/E trail (2/5/20 m window, age-faded) with velocity arrow and ground speed, altitude bar for `Up = -NavPosDown` with vertical rate, and two anchoring readouts — horizontal from `NavGnssTrusted`/`NavHorizontalOk`/`GnssNavOk` ("GNSS anchored" / "frozen — GNSS untrusted" / "no fix — position held", with a tagged fallback for older A2Ls), vertical from the barometer — plus a LOCK badge from `NavStationaryLocked` that explains a velocity pinned to zero |
+| **Motors** | ARM (with confirmation), DISARM (kill button, no confirmation), STOP ALL, a manual-throttle switch and one slider per motor (0 = stop, then 48..2047 — DShot commands 1..47 are never written), optional "link all four". Per motor: the DShot value actually on the wire with the commanded value as a marker, the bidirectional-DShot rpm, and the two telemetry sources side by side (bidir DShot: eRPM, ok count · KISS: rpm, temperature, received/missed) with a telemetry-alive lamp. Sliders are live only while connected, ARMED and the firmware has read back `CAL_motorManual` = 1 (checked once per second); a stale link shows STALE, never OFF. Everything is resolved by name from the A2L (`EscMotorState`, `EscM<n>*`, `CAL_motor*`) |
 
 The MF4 recording is deliberately standard-conforming, so measurement files can
 be evaluated without this tool — with asammdf, for instance.
@@ -47,6 +58,19 @@ lands.
 | Sensor-fusion signals (`Xcp_Fusion` block, fw v1.19.x) | commit `1cf8112` | 2026-08-27 |
 | 3D attitude view (`AttQuat0..3`/`AttRoll/Pitch/Yaw`/`AttState`, already in `Xcp_Fusion`) | this commit (Attitude tab, `attitudeview.*`/`attitudeglwidget.*`) | 2026-09-11 |
 | Magnetometer calibration CHARACTERISTICs (`NvmMagOffX/Y/Z`, `NvmMagScaleX/Y/Z`, `NvmMagDeclination`, already in `Xcp_Nvm`) | this commit (DFLASH tab rebuilt from the A2L, `xcppanel.cpp`) | 2026-09-13 |
+| Position/nav-fusion signals (`NavPosNorth/East/Down`, `NavVelNorth/East/Down`, `NavVerticalOk/HorizontalOk/OriginSet`, already in `Xcp_Fusion`; `GnssNavOk/NumSats/HAccuracy`, already in `Xcp_Data`) | commit `29d3351` (Position panel beside Attitude, `positionview.*`/`positionmath.*`) | 2026-09-14 |
+| `NavHorizontalOk` becomes a non-latching "trusted and fresh" flag; `NavGnssTrusted`/`NavStationaryLocked` added (`Xcp_Fusion` 0xBD/0xBE, fw ≥ 1.19.26, SWE1-FW-011/-014) | this commit (three-way horizontal anchoring text + LOCK badge, `positionview.*`/`positionmath.*`; older A2Ls without the two new channels still work via the `[legacy]`-tagged two-way reading) | 2026-09-15 |
+| Second diagnostics word `NavDiag` at the `Xcp_Fusion` tail (`0x700305FC`, `NavDiag_GnssUntrusted` bit 0, fw ≥ 1.19.30, SWE1-FW-011) | this commit (Diagnostics tab renders one section per A2L-derived diagnostic word instead of one hardcoded word, `diagmath.*`/`xcppanel.cpp`; an A2L with only the old `diagStatus` word still renders exactly as before) | 2026-09-15 |
+| Motors tab: `CAL_motorCmd`/`CAL_motorManual`/`CAL_motorManualSp_M1..4` (`Xcp_Cal`) and the `Xcp_Esc` block (`EscMotorState`, `EscM<n>DshotCmd/BidirRpm/BidirErpm/BidirOk/Alive/…`), motor.c state machine with XCP-link failsafe | this commit (Motors tab, `motorview.*`/`motormath.h`; an A2L without them shows "not in this A2L" and stays inert) | 2026-10-17 |
+| DShot throttle ceiling (`CAL_motorSpMax`, `Xcp_Cal` 0x50, fw PR #28) | commit `2027c6e` (Motors tab ceiling field, `motorview.*`; older GUI still works but cannot raise the ceiling above 1600 without the Calibration tab) | 2026-10-19 |
+
+![Motors tab: ARMED banner, manual-throttle switch, four motor columns with throttle slider, DShot value and rpm, bidirectional-DShot and KISS telemetry blocks underneath](docs/img/motor-tab.png)
+
+*Motors tab during a bench run. ARMED with manual throttle; motor 2 is
+commanded DShot 179 and turns at 1034 rpm by the bidirectional-DShot reply,
+the ESC's KISS telemetry agrees at 1029 rpm. The raw KISS voltage/current/mAh
+values sit in the labelled box at the bottom because they are not valid on
+this ESC.*
 
 ![Sensors tab showing live IMU, barometer, magnetometer and GNSS values read from the ECU](docs/img/sensors-tab.png)
 
@@ -55,6 +79,9 @@ lands.
 ![Plot and Log tab with several live signal traces](docs/img/plot-tab.png)
 
 *Plot & Log — freely configured plots over live XCP polling, recordable as MF4.*
+
+The Attitude, Position and Motors views sit in front of a live board; their
+logic is covered by the headless self-checks below.
 
 ---
 
@@ -88,7 +115,25 @@ If Qt DLLs are missing at startup, once:
 ```
 
 The target is still named `SerialMonitor` from the first stage, when the tool was
-nothing but a serial monitor.
+nothing but a serial monitor. `build.bat` does the same from an MSYS2 UCRT64
+toolchain and then builds and runs every self-check.
+
+## Self-checks
+
+The pure logic behind the views is split into header-only or widget-free units
+and exercised by headless CTest targets (`EXCLUDE_FROM_ALL`, built on purpose):
+`attitude_selfcheck` (handedness and NED mapping of the 3D view),
+`position_selfcheck` (window scaling, sign flips, trail fade, anchoring truth
+table), `diag_selfcheck` (A2L-derived diagnostic word grouping),
+`motor_selfcheck` (slider ↔ DShot mapping — never 1..47 on the wire),
+`motor_view_selfcheck` (the Motors tab on the offscreen platform with a
+synthetic A2L and synthetic read-backs) and `xcp_queue_selfcheck` (the one
+read-back window and reply parser behind the Motors-tab writes).
+
+```bat
+cmake --build build --target motor_selfcheck
+build\motor_selfcheck.exe
+```
 
 ---
 
@@ -108,8 +153,23 @@ mf4writer.*         MF4 writer for measurement files
 systemfooter.*      status bar
 attitudeview.*      "Attitude" tab: A2L binding, DAQ feed, readout, stale state
 attitudeglwidget.*  the 3D OpenGL view: model, room, camera, SLERP, NED mapping
+positionview.*      "Position" panel beside Attitude: A2L binding, trail/
+                    altitude widgets, anchoring readout, stale state
+positionmath.*      pure window-scaling/sign-flip/anchoring-state logic
+                    shared by positionview.cpp and position_selfcheck
+motorview.*         "Motors" tab: ARM/DISARM, manual throttle, per-motor sliders,
+                    live ESC readout (XCP writes go through XcpPanel)
+motormath.h         pure slider<->DShot mapping / bar scaling, shared by
+                    motorview.cpp and motor_selfcheck
+motorproto.h        pure helpers behind the Motors-tab XCP writes: which A2L
+                    words are motor words, the read-back window, reply parsing
+diagmath.*          pure Diagnostics-tab word-grouping logic (one section
+                    per A2L diagnostic word), shared by xcppanel.cpp and
+                    diag_selfcheck
 appicon.h           application icon
 lampicon.h          per-tab status lamps
+tools/              the self-check mains (one per target above) and mkicon
+docs/img/           screenshots
 ```
 
 ---

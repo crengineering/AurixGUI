@@ -43,6 +43,16 @@ private:
     void updateBoundState();
     void showFrozenReadout();
 
+    // SWE1-GUI-012: view-only yaw alignment. psi0 is GUI state (QSettings),
+    // never written to the board.
+    void alignYaw();
+    void clearAlign();
+    void applyAlign(bool active, double psi0Deg);
+    bool   m_alignActive  = false;
+    double m_alignPsi0    = 0.0;
+    bool   m_haveLastQuat = false;      // newest valid quaternion, for "Align yaw"
+    float  m_lastQuat[4]  = { 1.0f, 0.0f, 0.0f, 0.0f };
+
     AttitudeGLWidget *m_gl               = nullptr;
     QLabel           *m_rollLbl          = nullptr;
     QLabel           *m_pitchLbl         = nullptr;
@@ -52,6 +62,9 @@ private:
     QLabel           *m_bindStatusLbl    = nullptr;
     QLabel           *m_selfCheckLbl     = nullptr;   // red banner, self-check FAILED
     QPushButton      *m_resetViewBtn     = nullptr;
+    QPushButton      *m_alignYawBtn      = nullptr;   // SWE1-GUI-012
+    QPushButton      *m_clearAlignBtn    = nullptr;
+    QLabel           *m_alignLbl         = nullptr;   // "view aligned -137 deg", under Yaw
 
     QVector<A2lMeas> m_meas;
     int  m_idxQuat[4] = { -1, -1, -1, -1 };

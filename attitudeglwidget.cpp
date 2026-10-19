@@ -152,6 +152,21 @@ QMatrix4x4 nedToGlBasis()
         0.0f, 0.0f,  0.0f, 1.0f);
 }
 
+QQuaternion attitudeViewQuaternion(const QQuaternion &bodyToNed, double yawOffsetDeg)
+{
+    if (yawOffsetDeg == 0.0 || !std::isfinite(yawOffsetDeg))
+        return bodyToNed;
+    // q_view = q_z(-psi0) (x) q_board: the left factor acts in the NED frame,
+    // i.e. about the earth vertical, so roll/pitch of the board are untouched.
+    return QQuaternion::fromAxisAndAngle(0.0f, 0.0f, 1.0f, float(-yawOffsetDeg)) * bodyToNed;
+}
+
+double attitudeQuaternionYawDeg(const QQuaternion &q)
+{
+    const double w = q.scalar(), x = q.x(), y = q.y(), z = q.z();
+    return std::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)) * 180.0 / M_PI;
+}
+
 QMatrix4x4 attitudeModelMatrix(const QQuaternion &bodyToNed)
 {
     QMatrix4x4 rot;
@@ -193,6 +208,30 @@ bool attitudeSelfCheck(QString *report)
                    .arg(c.name)
                    .arg(double(c.expectedGl.x()), 0, 'f', 2).arg(double(c.expectedGl.y()), 0, 'f', 2).arg(double(c.expectedGl.z()), 0, 'f', 2)
                    .arg(double(gl.x()), 0, 'f', 2).arg(double(gl.y()), 0, 'f', 2).arg(double(gl.z()), 0, 'f', 2)
+                   .arg(ok ? "PASS" : "FAIL");
+    }
+    // SWE1-GUI-012: psi0 = 90 deg with a pure yaw +90 board quaternion must
+    // render as the identity (level, nose forward); psi0 = 0 must be a no-op.
+    {
+        const QQuaternion board = QQuaternion::fromAxisAndAngle(0, 0, 1, 90.0f);
+        const QQuaternion view  = attitudeViewQuaternion(board, 90.0);
+        const bool identity = std::abs(std::abs(view.scalar()) - 1.0f) < 1e-5f
+                           && std::abs(view.x()) < 1e-5f && std::abs(view.y()) < 1e-5f
+                           && std::abs(view.z()) < 1e-5f;
+        const QQuaternion same = attitudeViewQuaternion(board, 0.0);
+        const bool noop = (same.vector() - board.vector()).length() < 1e-6f
+                       && std::abs(same.scalar() - board.scalar()) < 1e-6f;
+        const bool yawOk = std::abs(attitudeQuaternionYawDeg(board) - 90.0) < 1e-3;
+        // Order check (z-rotations commute, so add a non-commuting roll):
+        // q_z(90) (x) q_x(30) with psi0=90 must leave pure q_x(30).
+        const QQuaternion qx30 = QQuaternion::fromAxisAndAngle(1, 0, 0, 30.0f);
+        const QQuaternion v2 = attitudeViewQuaternion(QQuaternion::fromAxisAndAngle(0, 0, 1, 90.0f) * qx30, 90.0);
+        const bool order = std::abs(std::abs(QQuaternion::dotProduct(v2, qx30)) - 1.0f) < 1e-5f;
+        const bool ok = identity && noop && yawOk && order;
+        allOk = allOk && ok;
+        out += QString("  view yaw align psi0=90, board yaw +90 -> identity (q=%1,%2,%3,%4), psi0=0 no-op -- %5\n")
+                   .arg(double(view.scalar()), 0, 'f', 4).arg(double(view.x()), 0, 'f', 4)
+                   .arg(double(view.y()), 0, 'f', 4).arg(double(view.z()), 0, 'f', 4)
                    .arg(ok ? "PASS" : "FAIL");
     }
     if (report)
@@ -259,6 +298,12 @@ void AttitudeGLWidget::pushQuaternion(float w, float x, float y, float z)
     }
     m_latestQuat = q;
     m_haveSample = true;
+}
+
+void AttitudeGLWidget::setYawOffsetDeg(double psi0Deg)
+{
+    m_yawOffsetDeg = std::isfinite(psi0Deg) ? psi0Deg : 0.0;
+    update();
 }
 
 void AttitudeGLWidget::setLive(bool live)
@@ -404,7 +449,7 @@ void AttitudeGLWidget::paintGL()
     const QMatrix4x4 view = camera();
     const QMatrix4x4 vp = m_proj * view;
     const QMatrix4x4 roomMvp  = vp * nedToGlBasis();
-    const QMatrix4x4 modelMvp = vp * attitudeModelMatrix(m_displayQuat);
+    const QMatrix4x4 modelMvp = vp * attitudeModelMatrix(attitudeViewQuaternion(m_displayQuat, m_yawOffsetDeg));
 
     m_program.bind();
 

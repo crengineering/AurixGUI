@@ -1,11 +1,14 @@
 #include "systemfooter.h"
+#include "motormath.h"
 #include "appicon.h"
 #include "lampicon.h"
 
 #include <QLabel>
 #include <QProgressBar>
+#include <QPushButton>
 #include <QHBoxLayout>
 #include <QFrame>
+#include <QMessageBox>
 
 namespace {
 /* Windows before a non-incrementing alive counter is called a hung core. The
@@ -31,6 +34,27 @@ constexpr SensorDef kSensors[] = {
 };
 static_assert(sizeof(kSensors) / sizeof(kSensors[0]) == SystemFooter::SensorCount,
               "kSensors and the lamp arrays must describe the same sensors");
+
+// The four ESCs, in EscM<n>Alive order. Order matches m_actuatorLamp[].
+constexpr const char *kActuators[] = { "M1", "M2", "M3", "M4" };
+static_assert(sizeof(kActuators) / sizeof(kActuators[0]) == SystemFooter::ActuatorCount,
+              "kActuators and the lamp arrays must describe the same ESCs");
+
+int indexOfMeas(const QVector<A2lMeas> &meas, const char *name)
+{
+    for (int i = 0; i < meas.size(); ++i)
+        if (meas[i].name == QLatin1String(name))
+            return i;
+    return -1;
+}
+
+int indexOfChar(const QVector<A2lChar> &chars, const char *name)
+{
+    for (int i = 0; i < chars.size(); ++i)
+        if (chars[i].name == QLatin1String(name))
+            return i;
+    return -1;
+}
 
 QFrame *makeSeparator()
 {
@@ -141,8 +165,75 @@ SystemFooter::SystemFooter(QWidget *parent)
         row->addLayout(cell);
     }
 
+    row->addWidget(makeSeparator());
+
+    // ESC telemetry-alive. Same lamp widget as Sensors, but per-cycle DAQ data
+    // rather than an init-time probe: the driver clears EscM<n>Alive after 3
+    // consecutive missed telemetry requests, so an unlit lamp here means the
+    // link to that ESC is currently down, not merely "never detected".
+    auto *actuatorsLabel = new QLabel(tr("Actuators:"));
+    actuatorsLabel->setFont(bold);
+    row->addWidget(actuatorsLabel);
+
+    for (int i = 0; i < ActuatorCount; ++i) {
+        m_actuatorLamp[i] = new QLabel;
+        m_actuatorName[i] = new QLabel(QString::fromLatin1(kActuators[i]));
+        m_actuatorName[i]->setFont(mono);
+
+        auto *cell = new QHBoxLayout;
+        cell->setSpacing(3);
+        cell->addWidget(m_actuatorLamp[i]);
+        cell->addWidget(m_actuatorName[i]);
+        row->addLayout(cell);
+    }
+
+    // EscMotorState next to the lamps: the one word that says whether the
+    // lamps below even mean anything yet (no telemetry is expected while
+    // still DISARMED).
+    m_actuatorStateVal = new QLabel("--");
+    m_actuatorStateVal->setFont(mono);
+    m_actuatorStateVal->setMinimumWidth(72);
+    m_actuatorStateVal->setToolTip(tr("EscMotorState: DISARMED / INIT / ARMED / FAILSAFE."));
+    row->addWidget(m_actuatorStateVal);
+
+    // ARM/DISARM, right of the state text: writes CAL_motorCmd. ARM asks for
+    // confirmation (arming is deliberate); DISARM never does - it is the
+    // software kill switch and has to fire on the first click. Both styled
+    // as solid white buttons rather than left in the footer's default look:
+    // against the red strip a merely-outlined button all but disappears, and
+    // DISARM in particular has to be the first thing the eye finds here.
+    m_armBtn = new QPushButton(tr("ARM"));
+    m_armBtn->setFont(mono);
+    m_armBtn->setToolTip(tr("Arm the motors (CAL_motorCmd = 1). Asks for "
+                            "confirmation first."));
+    m_armBtn->setStyleSheet(
+        "QPushButton { background: rgba(255, 255, 255, 0.85); color: #000000;"
+        " border: 1px solid rgba(0, 0, 0, 0.55); border-radius: 4px;"
+        " padding: 2px 10px; }"
+        "QPushButton:hover:!disabled { background: rgba(255, 255, 255, 1.0); }"
+        "QPushButton:disabled { background: rgba(255, 255, 255, 0.35);"
+        " color: rgba(0, 0, 0, 0.45); }");
+    row->addWidget(m_armBtn);
+
+    m_disarmBtn = new QPushButton(tr("DISARM"));
+    QFont disarmFont = mono;
+    disarmFont.setBold(true);
+    m_disarmBtn->setFont(disarmFont);
+    m_disarmBtn->setToolTip(tr("Disarm the motors immediately (CAL_motorCmd = 0). "
+                               "No confirmation - this is the kill switch."));
+    m_disarmBtn->setStyleSheet(
+        "QPushButton { background: #ffffff; color: #b22228;"
+        " border: 2px solid #b22228; border-radius: 4px; padding: 2px 10px; }"
+        "QPushButton:hover:!disabled { background: #ffe8e8; }"
+        "QPushButton:disabled { background: rgba(255, 255, 255, 0.35);"
+        " color: rgba(178, 34, 40, 0.45); border-color: rgba(178, 34, 40, 0.45); }");
+    row->addWidget(m_disarmBtn);
+
+    connect(m_armBtn,    &QPushButton::clicked, this, &SystemFooter::onArmClicked);
+    connect(m_disarmBtn, &QPushButton::clicked, this, &SystemFooter::onDisarmClicked);
+
     row->addStretch(1);
-    setConnected(false);
+    setConnected(false);   // also disables ARM/DISARM until connected
 }
 
 void SystemFooter::setPresence(int i, Presence p)
@@ -177,9 +268,88 @@ void SystemFooter::setPresence(int i, Presence p)
     m_sensorName[i]->setToolTip(tip);
 }
 
+void SystemFooter::setActuatorPresence(int i, Presence p)
+{
+    const bool lit = (p == Presence::Present);
+    const QColor color = lit                     ? LampColor::Green
+                       : (p == Presence::Absent) ? LampColor::Off
+                                                 : LampColor::Gray;
+    m_actuatorLamp[i]->setPixmap(bulbPixmap(color, lit, BULB_BEAD));
+
+    m_actuatorName[i]->setStyleSheet(lit ? "color: #000000;"
+                                         : "color: rgba(0, 0, 0, 0.65);");
+
+    const QString state = lit                     ? tr("alive")
+                        : (p == Presence::Absent) ? tr("NOT answering")
+                                                  : tr("unknown - not connected, "
+                                                       "or EscM%1Alive not in this A2L").arg(i + 1);
+    const QString tip = tr("ESC %1: %2\n"
+                           "Lit = the DShot driver received a valid telemetry "
+                           "reply recently.\nOff = 3 consecutive telemetry "
+                           "requests went unanswered.")
+                            .arg(QString::fromLatin1(kActuators[i]), state);
+    m_actuatorLamp[i]->setToolTip(tip);
+    m_actuatorName[i]->setToolTip(tip);
+}
+
+void SystemFooter::setAvailable(const QVector<A2lMeas> &meas)
+{
+    m_meas = meas;
+    m_idxEscAlive[0] = indexOfMeas(meas, "EscM1Alive");
+    m_idxEscAlive[1] = indexOfMeas(meas, "EscM2Alive");
+    m_idxEscAlive[2] = indexOfMeas(meas, "EscM3Alive");
+    m_idxEscAlive[3] = indexOfMeas(meas, "EscM4Alive");
+    m_idxEscState    = indexOfMeas(meas, "EscMotorState");
+
+    // A stale reading from a previous (or absent) A2L must not linger as if
+    // it were still current.
+    for (int i = 0; i < ActuatorCount; ++i)
+        setActuatorPresence(i, Presence::Unknown);
+    m_actuatorStateVal->setText("--");
+}
+
+void SystemFooter::setCharsAvailable(const QVector<A2lChar> &chars)
+{
+    m_idxMotorCmd = indexOfChar(chars, "CAL_motorCmd");
+    updateArmDisarmEnabled();
+}
+
+void SystemFooter::updateArmDisarmEnabled()
+{
+    const bool enabled = m_connected && m_idxMotorCmd >= 0;
+    m_armBtn->setEnabled(enabled);
+    m_disarmBtn->setEnabled(enabled);
+    const QString why = m_idxMotorCmd < 0
+        ? tr(" (CAL_motorCmd not in the loaded A2L)")
+        : (!m_connected ? tr(" (not connected)") : QString());
+    if (!why.isEmpty()) {
+        m_armBtn->setToolTip(tr("Arm the motors (CAL_motorCmd = 1).") + why);
+        m_disarmBtn->setToolTip(tr("Disarm the motors immediately (CAL_motorCmd = 0).") + why);
+    }
+}
+
+void SystemFooter::onArmClicked()
+{
+    const auto answer = QMessageBox::question(
+        this, tr("Arm motors?"),
+        tr("This arms the motors (CAL_motorCmd = 1). They will spin at any "
+           "nonzero throttle command from this point on.\n\nArm?"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer == QMessageBox::Yes)
+        emit armRequested();
+}
+
+void SystemFooter::onDisarmClicked()
+{
+    // Deliberately no confirmation: this is the kill switch, it has to act
+    // on the first click.
+    emit disarmRequested();
+}
+
 void SystemFooter::setConnected(bool connected)
 {
     m_connected = connected;
+    updateArmDisarmEnabled();
     if (!connected) {
         for (int i = 0; i < 6; ++i) {
             m_coreValue[i]->setText("--");
@@ -192,6 +362,11 @@ void SystemFooter::setConnected(bool connected)
         // missing would be a guess dressed up as a measurement.
         for (int i = 0; i < SensorCount; ++i)
             setPresence(i, Presence::Unknown);
+        // Same reasoning for the ESC lamps: disconnected is not "not
+        // answering", it is "no idea".
+        for (int i = 0; i < ActuatorCount; ++i)
+            setActuatorPresence(i, Presence::Unknown);
+        m_actuatorStateVal->setText("--");
     }
 }
 
@@ -253,4 +428,29 @@ void SystemFooter::update(const XcpClient::Measurements &m)
                                         m.baroPresent, m.gnssPresent };
     for (int i = 0; i < SensorCount; ++i)
         setPresence(i, present[i] ? Presence::Present : Presence::Absent);
+
+    // ESC telemetry-alive, decoded generically against whichever block
+    // Xcp_Esc landed in -- same A2lModel::decodeFrom() the Sensors tab and
+    // AttitudeView use, so nothing here assumes a fixed address. An A2L that
+    // does not describe EscM<n>Alive (older firmware) leaves that index at -1
+    // from setAvailable() and the lamp simply stays at "unknown".
+    for (int i = 0; i < ActuatorCount; ++i) {
+        Presence p = Presence::Unknown;
+        double v = 0.0;
+        if (m_idxEscAlive[i] >= 0 &&
+            A2lModel::decodeFrom(m.blockBase, m.blockRaw, m_meas[m_idxEscAlive[i]], &v)) {
+            p = (v != 0.0) ? Presence::Present : Presence::Absent;
+        }
+        setActuatorPresence(i, p);
+    }
+
+    if (m_idxEscState >= 0) {
+        double v = 0.0;
+        if (A2lModel::decodeFrom(m.blockBase, m.blockRaw, m_meas[m_idxEscState], &v))
+            m_actuatorStateVal->setText(motorStateName(int(v)));
+        else
+            m_actuatorStateVal->setText("--");
+    } else {
+        m_actuatorStateVal->setText("--");
+    }
 }

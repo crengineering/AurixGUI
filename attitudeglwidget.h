@@ -20,6 +20,16 @@ struct AttitudeVertex { float x, y, z, r, g, b; };
 // derivation and attitudeSelfCheck() below for the handedness proof.
 QMatrix4x4 nedToGlBasis();
 
+// View-only yaw alignment (SWE1-GUI-012): q_view = q_z(-psi0) (x) q_board, a
+// pre-rotation about the earth vertical (NED z, down). Applied to the rendered
+// model only -- never to anything sent to or read from the board.
+QQuaternion attitudeViewQuaternion(const QQuaternion &bodyToNed, double yawOffsetDeg);
+
+// Yaw (deg, -180..180) of a body-to-NED quaternion: the firmware's AttYaw
+// formula but WITHOUT the magnetic declination, so it is exactly the heading
+// the renderer draws.
+double attitudeQuaternionYawDeg(const QQuaternion &bodyToNed);
+
 // Model matrix for a body-frame vertex: rotate by the body-to-NED quaternion,
 // then apply the fixed NED->scene basis.
 QMatrix4x4 attitudeModelMatrix(const QQuaternion &bodyToNed);
@@ -71,6 +81,10 @@ public:
     // not just qDebug, since this app ships WIN32_EXECUTABLE with no console.
     bool selfCheckPassed() const { return m_selfCheckOk; }
 
+    // SWE1-GUI-012 view-only yaw alignment: render with the quaternion
+    // pre-rotated by -psi0 about the earth vertical. Not a camera change.
+    void setYawOffsetDeg(double psi0Deg);
+
 public slots:
     void resetView();
 
@@ -113,6 +127,7 @@ private:
     QQuaternion   m_displayQuat{1.0f, 0.0f, 0.0f, 0.0f};
     qint64        m_sampleIntervalMs = 100;
     QElapsedTimer m_sinceSample;
+    double        m_yawOffsetDeg = 0.0;    // psi0; 0 = north-up (SWE1-GUI-012)
     bool          m_haveSample = false;
     bool          m_live       = false;
     bool          m_selfCheckOk = false;   // see selfCheckPassed()
