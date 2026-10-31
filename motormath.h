@@ -57,6 +57,53 @@ inline int motorEffectiveMax(int spHi, int ceiling)
     return m;
 }
 
+// Speed mode (CAL_motorSpMode = 1): CAL_motorManualSp_Mn is mechanical rpm and
+// the firmware maps it to DShot through the thrust-rig run 5 table in motor.c
+// (Motor_convert_speed_to_throttle). Mirrored here ONLY to show the operator
+// which DShot value the firmware will command and to size the rpm slider; the
+// firmware stays the authority and nothing is written from this table.
+// Linear interpolation, uint32 integer truncation, above the last breakpoint
+// the last value (1600). The firmware's ceiling clamps afterwards.
+inline constexpr int kMotorRpmMax = 8257;      // last table breakpoint
+
+inline int motorSpeedToDshot(quint32 rpm)
+{
+    static constexpr quint32 kX[] = { 0, 1, 1300, 2629, 3829, 4929, 5929, 6814, 8257 };
+    static constexpr quint32 kY[] = { 0, 48, 200, 400, 600, 800, 1000, 1200, 1600 };
+    constexpr int n = int(sizeof(kX) / sizeof(kX[0]));
+    if (rpm >= kX[n - 1])
+        return int(kY[n - 1]);
+    for (int i = 1; i < n; ++i)
+        if (rpm <= kX[i])
+            return int(kY[i - 1] + (rpm - kX[i - 1]) * (kY[i] - kY[i - 1]) / (kX[i] - kX[i - 1]));
+    return int(kY[n - 1]);
+}
+
+// Largest rpm whose table value does not exceed maxDshot (the ceiling in
+// force); kMotorRpmMax when the ceiling is not below the table's top.
+inline int motorRpmMaxForDshot(int maxDshot)
+{
+    if (maxDshot >= motorSpeedToDshot(kMotorRpmMax))
+        return kMotorRpmMax;
+    int lo = 0, hi = kMotorRpmMax;              // f(lo) <= maxDshot < f(hi); f is monotonic
+    while (hi - lo > 1) {
+        const int mid = (lo + hi) / 2;
+        if (motorSpeedToDshot(quint32(mid)) <= maxDshot) lo = mid; else hi = mid;
+    }
+    return lo;
+}
+
+// DShot value the firmware commands for a speed setpoint: table, then ceiling.
+inline int motorSpeedCommand(quint32 rpm, int ceiling)
+{
+    const int d = motorSpeedToDshot(rpm);
+    return (ceiling >= kMotorDshotMin && d > ceiling) ? ceiling : d;
+}
+
+// CAL_motorSpMode read-back -> 0 throttle / 1 speed. The firmware treats any
+// nonzero value as SPEED and does not validate it, so neither do we.
+inline int motorModeFromRead(quint32 v) { return v != 0 ? 1 : 0; }
+
 // EscMnDshotCmd -> 0..1 bar fill (fraction of 2047). Garbage clamps, never NaN.
 inline double motorBarFraction(double dshot)
 {
@@ -120,6 +167,28 @@ inline bool motorSelfCheck(QString *report)
           motorSliderToDshot(2047, 1600) == 1600 && motorSliderToDshot(47, 1600) == 0);
     check("1600 ceiling: 1601 not writable, 1600 / 0 are",
           !motorDshotWritable(1601, 1600) && motorDshotWritable(1600, 1600) && motorDshotWritable(0, 1600));
+
+    check("speed table: 0 -> 0, 1 -> 48", motorSpeedToDshot(0) == 0 && motorSpeedToDshot(1) == 48);
+    check("speed table: 650 -> 123, 1299 -> 199, 1300 -> 200",
+          motorSpeedToDshot(650) == 123 && motorSpeedToDshot(1299) == 199 && motorSpeedToDshot(1300) == 200);
+    check("speed table: 1964 -> 299, 4929 -> 800", motorSpeedToDshot(1964) == 299 && motorSpeedToDshot(4929) == 800);
+    check("speed table: 8257 -> 1600, 9000 -> 1600", motorSpeedToDshot(8257) == 1600 && motorSpeedToDshot(9000) == 1600);
+    bool mono = true;
+    for (quint32 r = 1; r <= 9000; ++r)
+        if (motorSpeedToDshot(r) < motorSpeedToDshot(r - 1) || (r <= 8257 && motorSpeedToDshot(r) < 48)) mono = false;
+    check("speed table: monotonic, never 1..47", mono);
+    check("rpm max: ceiling 1600 -> 8257, 2047 -> 8257, 1000 -> 5933",
+          motorRpmMaxForDshot(1600) == 8257 && motorRpmMaxForDshot(2047) == 8257 && motorRpmMaxForDshot(1000) == 5933);
+    bool inv = true;
+    for (int c : { 48, 49, 123, 200, 799, 1000, 1599 }) {
+        const int m = motorRpmMaxForDshot(c);
+        if (motorSpeedToDshot(quint32(m)) > c || motorSpeedToDshot(quint32(m + 1)) <= c) inv = false;
+    }
+    check("rpm max: largest rpm not above the ceiling", inv);
+    check("speed command: ceiling clamps after the table",
+          motorSpeedCommand(8257, 1000) == 1000 && motorSpeedCommand(4929, 1600) == 800 && motorSpeedCommand(0, 1000) == 0);
+    check("mode read-back: 0 throttle, anything else speed",
+          motorModeFromRead(0) == 0 && motorModeFromRead(1) == 1 && motorModeFromRead(7) == 1);
 
     check("bar 0 -> 0", motorBarFraction(0) == 0.0);
     check("bar 2047 -> 1", motorBarFraction(2047) == 1.0);
