@@ -76,7 +76,7 @@ private:
         QLabel    *rpmLbl = nullptr, *rpmCaption = nullptr, *erpmLbl = nullptr,
                   *tempLbl = nullptr, *dshotLbl = nullptr, *countsLbl = nullptr,
                   *aliveLamp = nullptr, *aliveLbl = nullptr,
-                  *rawLbl = nullptr,
+                  *rawLbl = nullptr, *cmdLbl = nullptr,
                   *kRpmLbl = nullptr, *kErpmLbl = nullptr, *tlmLbl = nullptr;
         MotorBar  *bar = nullptr;
         QSlider   *slider = nullptr;
@@ -89,6 +89,11 @@ private:
     void applyCeiling(quint32 value, bool fresh);
     void applyRange();                    // slider / spinbox maximum from A2L limit + ceiling
     void onSetCeiling();
+    void applyMode(quint32 value, bool fresh);
+    void onModeClicked(int mode);
+    void updateModeUi();
+    bool speedMode() const { return m_modeOk && m_mode == 1; }
+    int  sliderDshot(int pos) const;      // DShot the firmware will command for a slider position
     void updateCeilingUi();
     void onSliderChanged(int motor, int pos);
     void onSpinChanged(int motor, int pos);
@@ -132,6 +137,13 @@ private:
     QSpinBox    *m_ceilSpin = nullptr;
     QPushButton *m_ceilBtn = nullptr;
     QTimer       m_ceilTimer;    // timeout of an unconfirmed ceiling write
+
+    bool m_modeOk   = false;     // CAL_motorSpMode is in the A2L (older firmware: false = throttle only)
+    int  m_mode     = -1;        // CAL_motorSpMode as read back: 0 throttle, 1 speed (rpm), -1 unknown
+    int  m_modeReq  = -1;        // unconfirmed mode write, -1 none
+    QLabel      *m_modeLbl = nullptr;
+    QPushButton *m_modeThrBtn = nullptr, *m_modeRpmBtn = nullptr;
+    QTimer       m_modeTimer;    // timeout of an unconfirmed mode write
 
     bool m_connected  = false;
     bool m_haveSample = false;
