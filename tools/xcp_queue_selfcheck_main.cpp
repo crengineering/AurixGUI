@@ -177,6 +177,31 @@ int main(int argc, char **argv)
         dc.replace(16, 2, w16(1600));
         check("ceiling: parsed from the read-back", motorParseRead(withCeil, pc, 0x2140, dc).value("CAL_motorSpMax") == 1600);
 
+        // CAL_motorSpMode (0x2152, real A2L 0x70030152): inside the same window
+        // (real A2L span 0x140..0x153 = 20 bytes <= 63), not purged by DISARM, and
+        // a CAL_motor* write like any other (bumps the freshness sequence).
+        QVector<A2lChar> withMode = withCeil;
+        A2lChar sp; sp.name = "CAL_motorSpMode"; sp.addr = 0x2152; sp.type = A2lType::Uint16; withMode.append(sp);
+        const MotorReadPlan pm = motorReadPlan(withMode);
+        check("mode: read plan widens to 20 bytes, still one SHORT_UPLOAD", pm.ok && pm.lo == 0x2140 && pm.len == 20);
+        check("mode: not in the DISARM purge set (6 stay), not a setpoint",
+              motorWriteAddrs(withMode, false).size() == 6 && motorWriteAddrs(withMode, true).size() == 4
+                  && motorIsMotorChar("CAL_motorSpMode") && motorIsModeChar("CAL_motorSpMode"));
+        QByteArray dm(20, '\0');
+        dm.replace(16, 2, w16(1600));
+        dm.replace(18, 2, w16(1));
+        const auto vm = motorParseRead(withMode, pm, 0x2140, dm);
+        check("mode: parsed from the read-back next to the ceiling",
+              vm.value("CAL_motorSpMode") == 1 && vm.value("CAL_motorSpMax") == 1600);
+        check("mode: an 18-byte reply to the 20-byte plan is rejected", motorParseRead(withMode, pm, 0x2140, dm.left(18)).isEmpty());
+        {
+            MotorReadTags t;
+            quint32 seq = 0, tag = 0;
+            t.issue(seq);
+            ++seq;                                          // a CAL_motorSpMode write is a CAL_motor* write
+            check("mode: read issued before a mode write is stale", t.take(&tag) && !MotorReadTags::isFresh(tag, seq));
+        }
+
         QVector<A2lChar> far = chars;
         A2lChar f; f.name = "CAL_motorManualSp_M9"; f.addr = 0x2140 + 80; f.type = A2lType::Uint16; far.append(f);
         const MotorReadPlan bad = motorReadPlan(far);

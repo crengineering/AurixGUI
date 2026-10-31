@@ -94,6 +94,44 @@ struct Rig {
         v["CAL_motorSpMax"] = ceil;
         view.onCharsRead(v, fresh);
     }
+    // Variant with CAL_motorSpMax and CAL_motorSpMode (real A2L: 0x..150 / 0x..152)
+    void addModeChars()
+    {
+        addCeilingChar();
+        QVector<A2lMeas> meas;
+        A2lMeas st; st.name = "EscMotorState"; st.addr = 0x1000; st.type = A2lType::Uint8; st.hi = 3;
+        meas.append(st);
+        QVector<A2lChar> chars;
+        auto add = [&](const char *n, quint32 a, A2lType t, double hi) {
+            A2lChar c; c.name = n; c.addr = a; c.type = t; c.hi = hi; chars.append(c);
+        };
+        add("CAL_motorCmd", 0x2140, A2lType::Uint32, 1);
+        add("CAL_motorManual", 0x2144, A2lType::Uint32, 1);
+        for (int i = 0; i < 4; ++i)
+            add(qPrintable(QString("CAL_motorManualSp_M%1").arg(i + 1)), 0x2148 + 2 * i, A2lType::Uint16, 2047);
+        add("CAL_motorSpMax", 0x2150, A2lType::Uint16, 2047);
+        add("CAL_motorSpMode", 0x2152, A2lType::Uint16, 1);
+        view.setAvailable(meas);
+        view.setCharsAvailable(chars);
+    }
+    void readBackAll(quint32 manual, quint32 ceil, quint32 mode, quint32 sp = 0, bool fresh = true)
+    {
+        QMap<QString, quint32> v;
+        v["CAL_motorCmd"] = 1;
+        v["CAL_motorManual"] = manual;
+        for (int i = 1; i <= 4; ++i)
+            v[QString("CAL_motorManualSp_M%1").arg(i)] = sp;
+        v["CAL_motorSpMax"] = ceil;
+        v["CAL_motorSpMode"] = mode;
+        view.onCharsRead(v, fresh);
+    }
+    QSpinBox *sliderSpin()
+    {
+        for (QSpinBox *b : view.findChildren<QSpinBox *>())
+            if (b->minimum() == kMotorSliderStop) return b;
+        return nullptr;
+    }
+    QPushButton *modeBtn(bool speed) { return button(speed ? "Speed (rpm)" : "Throttle (DShot)", true); }
     QPushButton *ceilBtn() { return button("Set ceiling", true); }
     QSpinBox *ceilSpin()
     {
@@ -456,6 +494,108 @@ int main(int argc, char **argv)
         r.readBack(0, 0);
         r.readBack(1, 0);
         check("fallback: manual handshake works as before", r.slidersEnabled());
+    }
+
+    // 13. setpoint unit (CAL_motorSpMode): firmware read-back decides, never the click
+    {
+        Rig r;
+        r.addModeChars();
+        r.view.setConnected(true);
+        r.sample(2);
+        check("mode: read-back requested at connect", r.readBacks > 0);
+        r.readBackAll(0, 1600, 99, 0, true);   // any nonzero = SPEED
+        check("mode: nonzero read-back = SPEED, label + button follow the firmware",
+              r.hasText("SPEED rpm") && r.modeBtn(true)->isChecked() && !r.modeBtn(false)->isChecked());
+        check("mode SPEED, ceiling 1600: slider maximum 8257 rpm, spin suffix ' rpm'",
+              r.sliders()[0]->maximum() == 8257 && r.sliders()[3]->maximum() == 8257
+                  && r.sliderSpin()->suffix() == " rpm");
+        r.readBackAll(0, 1000, 1);
+        check("mode SPEED, ceiling 1000: slider maximum 5933 rpm", r.sliders()[0]->maximum() == 5933);
+        r.readBackAll(0, 1600, 1);
+        r.button("Manual throttle")->click();
+        r.readBackAll(0, 1600, 1);
+        r.readBackAll(1, 1600, 1);
+        check("mode SPEED: sliders enabled after manual handshake", r.slidersEnabled());
+        r.writes.clear();
+        r.sliders()[0]->setValue(4929);
+        wait(120);
+        check("mode SPEED: slider writes rpm 4929 to M1", r.writes.size() == 1 && r.writes[0].first == "CAL_motorManualSp_M1"
+                                                              && r.writes[0].second == 4929);
+        check("mode SPEED: shows the DShot value the firmware will command", r.hasText("-> DShot  800"));
+
+        // switch to THROTTLE: stop first, pending until read-back
+        r.writes.clear();
+        r.stopAlls = 0;
+        r.sliders()[0]->setValue(3000);
+        r.modeBtn(false)->click();
+        check("mode request: stop-all issued, mode write CAL_motorSpMode = 0",
+              r.stopAlls == 1 && r.countWrites("CAL_motorSpMode") == 1 && r.writes.last().second == 0);
+        check("mode request: sliders at STOP and disabled while pending",
+              r.sliders()[0]->value() == 47 && !r.slidersEnabled() && r.hasText("pending"));
+        check("mode request: unit unchanged until the read-back", r.sliders()[0]->maximum() == 8257
+                                                                     && r.modeBtn(true)->isEnabled() == false);
+        r.readBackAll(1, 1600, 1, 0, false);   // stale reply: ignored
+        check("mode request: stale reply does not confirm", !r.slidersEnabled() && r.hasText("pending"));
+        r.readBackAll(1, 1600, 0);
+        check("mode request: confirmed -> throttle range 1600, sliders live again",
+              r.sliders()[0]->maximum() == 1600 && r.slidersEnabled() && r.hasText("THROTTLE")
+                  && r.modeBtn(false)->isChecked());
+        // mismatch: operator asks for SPEED, firmware keeps THROTTLE
+        r.modeBtn(true)->click();
+        r.readBackAll(1, 1600, 0);
+        check("mode mismatch: GUI follows the firmware and shows a notice",
+              r.sliders()[0]->maximum() == 1600 && r.hasText("not in force") && r.modeBtn(false)->isChecked());
+        // changed outside this tab while manual is ON: sliders stopped, firmware stopped
+        r.stopAlls = 0;
+        r.sliders()[1]->setValue(500);
+        r.readBackAll(1, 1600, 1);
+        check("mode changed elsewhere: stop-all + rpm range + notice",
+              r.stopAlls == 1 && r.sliders()[1]->value() == 47 && r.sliders()[0]->maximum() == 8257
+                  && r.hasText("outside this tab"));
+        // reconnect: the unit is never assumed
+        r.view.setConnected(false);
+        r.view.setConnected(true);
+        r.sample(2);
+        check("reconnect: unit unknown (label --, Manual not writable, neither button checked)",
+              r.hasText("Unit (CAL_motorSpMode): --") && !r.button("Manual throttle")->isEnabled()
+                  && !r.modeBtn(true)->isChecked() && !r.modeBtn(false)->isChecked());
+        r.readBackAll(0, 1600, 0);
+        check("reconnect: throttle read back -> Manual writable, range 1600",
+              r.button("Manual throttle")->isEnabled() && r.sliders()[0]->maximum() == 1600);
+    }
+    {
+        // unconfirmed mode write times out into 'unknown'
+        Rig r;
+        r.addModeChars();
+        r.view.setConnected(true);
+        r.sample(2);
+        r.readBackAll(0, 1600, 1);
+        r.modeBtn(false)->click();
+        wait(1700);
+        r.sample(2);
+        check("mode: unconfirmed write -> unit unknown + notice, sliders locked",
+              r.hasText("Unit (CAL_motorSpMode): --") && !r.slidersEnabled() && r.hasText("not confirmed"));
+    }
+    {
+        // older A2L without CAL_motorSpMode: control inert, throttle exactly as before
+        Rig r;
+        r.addCeilingChar();
+        r.view.setConnected(true);
+        r.sample(2);
+        r.readBackCeil(0, 1600);
+        check("no-mode A2L: label n/a, buttons disabled with a cause",
+              r.hasText("Unit (CAL_motorSpMode): n/a") && !r.modeBtn(true)->isEnabled()
+                  && !r.modeBtn(false)->isEnabled()
+                  && r.modeBtn(true)->toolTip() == "firmware without CAL_motorSpMode (throttle only)");
+        r.writes.clear();
+        r.modeBtn(true)->click();
+        check("no-mode A2L: clicking writes nothing", r.writes.isEmpty());
+        r.button("Manual throttle")->click();
+        r.readBackCeil(0, 1600);
+        r.readBackCeil(1, 1600);
+        check("no-mode A2L: throttle range 1600 and handshake as before",
+              r.slidersEnabled() && r.sliders()[0]->maximum() == 1600
+                  && r.sliderSpin()->suffix().isEmpty());
     }
 
     std::printf("%s\n", g_fail == 0 ? "[motor_view_selfcheck] PASS" : "[motor_view_selfcheck] FAIL");
