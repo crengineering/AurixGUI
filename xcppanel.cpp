@@ -1464,6 +1464,8 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
                 (void)A2lModel::decodeFrom(m.blockBase, m.blockRaw, m_meas[m_signalIdx[idx]], &v);
             values.append(v);
         }
+        for (const QString &n : m_logMotorChars)
+            values.append(double(m_motorLast.value(n, 0u)));
         m_mf4.append(double(m_timeBase.elapsed() - m_logStartMs) / 1000.0, values);
         updateLogStatus();
     }
@@ -1540,6 +1542,23 @@ void XcpPanel::startLogging()
     for (int idx : sel) {
         const A2lMeas &mm = m_meas[m_signalIdx[idx]];
         cfg.append({mm.name, mm.unit, mm.type == A2lType::Float32});
+    }
+    // Motor setpoint words (read-back values) ride along as uint32 channels
+    // whenever the A2L has them: the unit of the four setpoints is given by
+    // CAL_motorSpMode in the same file (0 DShot, 1 rpm).
+    m_logMotorChars.clear();
+    if (motorReadPlan(m_chars).ok) {
+        for (const char *n : { "CAL_motorSpMode", "CAL_motorManualSp_M1", "CAL_motorManualSp_M2",
+                               "CAL_motorManualSp_M3", "CAL_motorManualSp_M4", "CAL_motorSpMax", "CAL_motorManual" }) {
+            const QString name = QString::fromLatin1(n);
+            for (const auto &c : m_chars) {
+                if (c.name == name) {
+                    m_logMotorChars.append(name);
+                    cfg.append({name, QString(), false});
+                    break;
+                }
+            }
+        }
     }
     m_mf4.begin(cfg);
 
@@ -1933,9 +1952,16 @@ void XcpPanel::writeMotorChar(const QString &name, quint32 value)
         m_log->appendPlainText(QString("[Motors: not connected - write of %1 skipped]").arg(name));
         return;
     }
-    if (name.startsWith(QLatin1String("CAL_motorManualSp_")) && !motorDshotWritable(value)) {
-        m_log->appendPlainText(QString("[Motors: refused %1 = %2 (DShot 1..47 are commands)]").arg(name).arg(value));
-        return;
+    if (name.startsWith(QLatin1String("CAL_motorManualSp_"))) {
+        // The gate must use the unit the firmware will read: rpm in speed mode
+        // (confirmed read-back of CAL_motorSpMode), DShot otherwise.
+        const bool speed = m_motorView && m_motorView->speedMode();
+        if (!motorSetpointWritable(value, speed)) {
+            m_log->appendPlainText(speed
+                ? QString("[Motors: refused %1 = %2 (speed mode: 0..%3 rpm)]").arg(name).arg(value).arg(kMotorRpmMax)
+                : QString("[Motors: refused %1 = %2 (DShot 1..47 are commands)]").arg(name).arg(value));
+            return;
+        }
     }
     if (motorIsCeilingChar(name) && !motorCeilingValid(value)) {
         m_log->appendPlainText(QString("[Motors: refused %1 = %2 (ceiling must be 48..2047)]").arg(name).arg(value));
@@ -2018,6 +2044,7 @@ bool XcpPanel::handleMotorRead(quint32 address, const QByteArray &data)
     const bool haveTag = m_motorReadTags.take(&tag);
     const bool fresh = haveTag && MotorReadTags::isFresh(tag, m_motorWriteSeq);
     populateCharsFromRead(address, data, /*quiet=*/true);   // keep the Calibration rows current
+    m_motorLast.insert(values);                              // latest firmware-held CAL_motor* words, for the log
     emit motorCharsRead(values, fresh);
     return true;
 }

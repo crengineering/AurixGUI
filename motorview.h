@@ -40,6 +40,9 @@ public:
 
     void setAvailable(const QVector<A2lMeas> &meas);
     void setCharsAvailable(const QVector<A2lChar> &chars);
+    // Unit of CAL_motorManualSp_Mn as confirmed by read-back: true = rpm (speed mode).
+    // XcpPanel gates setpoint writes with it, so it must be public.
+    bool speedMode() const { return m_modeOk && m_mode == 1; }
 
 public slots:
     void setConnected(bool connected);
@@ -76,11 +79,12 @@ private:
         QLabel    *rpmLbl = nullptr, *rpmCaption = nullptr, *erpmLbl = nullptr,
                   *tempLbl = nullptr, *dshotLbl = nullptr, *countsLbl = nullptr,
                   *aliveLamp = nullptr, *aliveLbl = nullptr,
-                  *rawLbl = nullptr,
+                  *rawLbl = nullptr, *cmdLbl = nullptr, *spinCaption = nullptr,
                   *kRpmLbl = nullptr, *kErpmLbl = nullptr, *tlmLbl = nullptr;
         MotorBar  *bar = nullptr;
         QSlider   *slider = nullptr;
-        QSpinBox  *spin = nullptr;
+        QSpinBox  *spin = nullptr;      // direct entry: free text, applied by setBtn / Enter only
+        QPushButton *setBtn = nullptr;
     };
 
     enum class Manual { Unknown, Off, On };                 // as read back from the firmware
@@ -89,9 +93,13 @@ private:
     void applyCeiling(quint32 value, bool fresh);
     void applyRange();                    // slider / spinbox maximum from A2L limit + ceiling
     void onSetCeiling();
+    void applyMode(quint32 value, bool fresh);
+    void onModeClicked(int mode);
+    void updateModeUi();
+    int  sliderDshot(int pos) const;      // DShot the firmware will command for a slider position
     void updateCeilingUi();
     void onSliderChanged(int motor, int pos);
-    void onSpinChanged(int motor, int pos);
+    void onSetClicked(int motor);          // apply the entry field to the slider (= write)
     void onArmClicked();
     void onManualClicked(bool on);
     void onStopAll();
@@ -132,6 +140,13 @@ private:
     QSpinBox    *m_ceilSpin = nullptr;
     QPushButton *m_ceilBtn = nullptr;
     QTimer       m_ceilTimer;    // timeout of an unconfirmed ceiling write
+
+    bool m_modeOk   = false;     // CAL_motorSpMode is in the A2L (older firmware: false = throttle only)
+    int  m_mode     = -1;        // CAL_motorSpMode as read back: 0 throttle, 1 speed (rpm), -1 unknown
+    int  m_modeReq  = -1;        // unconfirmed mode write, -1 none
+    QLabel      *m_modeLbl = nullptr;
+    QPushButton *m_modeThrBtn = nullptr, *m_modeRpmBtn = nullptr;
+    QTimer       m_modeTimer;    // timeout of an unconfirmed mode write
 
     bool m_connected  = false;
     bool m_haveSample = false;

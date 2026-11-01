@@ -32,6 +32,13 @@ inline bool motorIsCeilingChar(const QString &name)
     return name == QLatin1String("CAL_motorSpMax");
 }
 
+// Setpoint unit (CAL_motorSpMode): persistent like the ceiling, not zeroed by
+// the firmware on exit from ARMED, so DISARM does not purge it either.
+inline bool motorIsModeChar(const QString &name)
+{
+    return name == QLatin1String("CAL_motorSpMode");
+}
+
 // Addresses of every CAL_motor* word (cmd, manual, setpoints), or of the
 // setpoints only. DISARM purges the former so no queued ARM / manual-ON write
 // can execute after the kill.
@@ -40,7 +47,8 @@ inline QSet<quint32> motorWriteAddrs(const QVector<A2lChar> &chars, bool setpoin
     QSet<quint32> a;
     for (const A2lChar &c : chars)
         if (setpointsOnly ? motorIsSetpointChar(c.name)
-                          : (motorIsMotorChar(c.name) && !motorIsCeilingChar(c.name)))
+                          : (motorIsMotorChar(c.name) && !motorIsCeilingChar(c.name)
+                             && !motorIsModeChar(c.name)))
             a.insert(c.addr);
     return a;
 }

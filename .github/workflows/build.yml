@@ -78,17 +78,18 @@ jobs:
       # executable. LGPL-3.0 section 4 requires that a binary distribution carry
       # a prominent notice naming the library, plus copies of the LGPL and the
       # GPL it incorporates. The uploaded artifact is such a distribution once
-      # this repository is public, so the paperwork travels with it.
+      # this repository is public, so the paperwork travels with it. The GNU
+      # texts are vendored in licenses/ (verbatim copies of gnu.org's
+      # lgpl-3.0.txt / gpl-3.0.txt) — fetching them at build time made the
+      # job fail whenever the runner could not reach gnu.org (2026-11-01).
       - name: Bundle license texts with the artifact
         shell: bash
         run: |
           set -euo pipefail
-          cp LICENSE     build/Release/LICENSE.txt
-          cp NOTICE.txt  build/Release/NOTICE.txt
-          curl -fsSL --retry 3 https://www.gnu.org/licenses/lgpl-3.0.txt \
-               -o build/Release/LICENSE.LGPL-3.0.txt
-          curl -fsSL --retry 3 https://www.gnu.org/licenses/gpl-3.0.txt \
-               -o build/Release/LICENSE.GPL-3.0.txt
+          cp LICENSE                        build/Release/LICENSE.txt
+          cp NOTICE.txt                     build/Release/NOTICE.txt
+          cp licenses/LICENSE.LGPL-3.0.txt  build/Release/LICENSE.LGPL-3.0.txt
+          cp licenses/LICENSE.GPL-3.0.txt   build/Release/LICENSE.GPL-3.0.txt
           ls -l build/Release/*.txt
 
       - name: Upload artifact

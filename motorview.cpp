@@ -222,6 +222,19 @@ MotorView::MotorView(QWidget *parent)
     row3->addWidget(m_ceilLbl);
     row3->addWidget(m_ceilSpin);
     row3->addWidget(m_ceilBtn);
+    row3->addSpacing(24);
+    m_modeLbl = new QLabel;
+    m_modeLbl->setFont(mono);
+    m_modeLbl->setMinimumWidth(300);
+    m_modeThrBtn = new QPushButton(tr("Throttle (DShot)"));
+    m_modeRpmBtn = new QPushButton(tr("Speed (rpm)"));
+    for (QPushButton *b : { m_modeThrBtn, m_modeRpmBtn }) {
+        b->setCheckable(true);
+        b->setFocusPolicy(Qt::ClickFocus);
+    }
+    row3->addWidget(m_modeLbl);
+    row3->addWidget(m_modeThrBtn);
+    row3->addWidget(m_modeRpmBtn);
     row3->addStretch(1);
 
     m_bindLbl = new QLabel;
@@ -260,9 +273,27 @@ MotorView::MotorView(QWidget *parent)
         u.spin->setValue(kMotorSliderStop);
         u.spin->setSpecialValueText(tr("STOP"));
         u.spin->setKeyboardTracking(false);   // commit on Enter / focus-out / arrows
-        u.spin->setFont(mono);
+        u.spin->setFont(bigMono);
         u.spin->setAlignment(Qt::AlignRight);
         u.spin->setFocusPolicy(Qt::ClickFocus);
+        // 2026-11-01: the flat default look was not recognised as an input field on
+        // the rig; a framed, taller box with a caption makes the direct entry visible.
+        u.spin->setMinimumHeight(32);
+        u.spin->setStyleSheet("QSpinBox { border: 1px solid #8a8a8a; border-radius: 3px; padding: 2px 6px; }"
+                              "QSpinBox:focus { border: 2px solid #2e86de; }");
+        u.spin->setToolTip(tr("Type the setpoint, then press Set or Enter. The field is yours: neither the slider "
+                              "nor the firmware read-back overwrites it."));
+        u.spinCaption = new QLabel(tr("DShot"));
+        u.spinCaption->setFont(smallMono);
+        u.spinCaption->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        u.setBtn = new QPushButton(tr("Set"));
+        u.setBtn->setFocusPolicy(Qt::NoFocus);   // the entry keeps the focus for a repeated Enter
+        u.setBtn->setToolTip(tr("Apply the entered value to this motor (same path as the slider)."));
+
+        u.cmdLbl = new QLabel;
+        u.cmdLbl->setFont(smallMono);
+        u.cmdLbl->setAlignment(Qt::AlignRight);
+        u.cmdLbl->setVisible(false);
 
         u.dshotLbl  = new QLabel("--");
         u.erpmLbl   = new QLabel("--");
@@ -308,14 +339,24 @@ MotorView::MotorView(QWidget *parent)
         col->addWidget(u.rpmLbl);
         col->addWidget(u.rpmCaption);
         col->addLayout(barRow, 1);
-        col->addWidget(u.spin);
+        auto *setRow = new QHBoxLayout;
+        setRow->addWidget(u.spinCaption);
+        setRow->addWidget(u.spin, 1);
+        setRow->addWidget(u.setBtn);
+        col->addLayout(setRow);
+        col->addWidget(u.cmdLbl);
         col->addLayout(form);
         col->addLayout(aliveRow);
 
         motorsRow->addWidget(u.box, 1);
 
         connect(u.slider, &QSlider::valueChanged, this, [this, i](int v) { onSliderChanged(i, v); });
-        connect(u.spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, i](int v) { onSpinChanged(i, v); });
+        // Entry field: applied by the Set button or by Enter while the field has
+        // the focus. editingFinished also fires on focus-out; that must not write.
+        connect(u.setBtn, &QPushButton::clicked, this, [this, i] { onSetClicked(i); });
+        connect(u.spin, &QAbstractSpinBox::editingFinished, this, [this, i] {
+            if (m_ui[i].spin->hasFocus()) onSetClicked(i);
+        });
     }
 
     // ---- raw KISS values, collapsed by default --------------------------
@@ -373,6 +414,20 @@ MotorView::MotorView(QWidget *parent)
         updateControls();
         emit readBackRequested();
     });
+    connect(m_modeThrBtn, &QPushButton::clicked, this, [this]() { onModeClicked(0); });
+    connect(m_modeRpmBtn, &QPushButton::clicked, this, [this]() { onModeClicked(1); });
+    m_modeTimer.setSingleShot(true);
+    connect(&m_modeTimer, &QTimer::timeout, this, [this]() {
+        if (m_modeReq < 0)
+            return;
+        m_notice = tr("CAL_motorSpMode = %1 was not confirmed by read-back within 1.5 s - the setpoint unit in force is unknown.").arg(m_modeReq);
+        emit logMessage(QStringLiteral("[Motors] ") + m_notice);
+        m_modeReq = -1;
+        m_mode = -1;
+        applyRange();
+        updateControls();
+        emit readBackRequested();
+    });
     connect(m_manualBtn,  &QPushButton::clicked, this, [this]() { onManualClicked(m_manual != Manual::On); });
 
     m_flushTimer.setSingleShot(true);
@@ -385,7 +440,7 @@ MotorView::MotorView(QWidget *parent)
     connect(&m_pollTimer, &QTimer::timeout, this, [this]() {
         // 1 Hz while ARMED (manual state) and, with a ceiling in the A2L, in
         // every state so a ceiling changed elsewhere is followed.
-        if (m_connected && !isStale() && m_charsOk && (m_state == 2 || m_ceilOk))
+        if (m_connected && !isStale() && m_charsOk && (m_state == 2 || m_ceilOk || m_modeOk))
             emit readBackRequested();
     });
     m_pollTimer.start();
@@ -443,6 +498,12 @@ void MotorView::setCharsAvailable(const QVector<A2lChar> &chars)
         m_ceiling = -1;
         m_ceilReq = -1;
     }
+    m_modeOk = findChar(chars, QStringLiteral("CAL_motorSpMode")) != nullptr;
+    if (!m_modeOk) {
+        m_mode = -1;
+        m_modeReq = -1;
+        m_modeTimer.stop();
+    }
     for (int i = 0; i < kMotors; ++i) {
         const A2lChar *c = findChar(chars, spName(i));
         if (!c) { ok = false; continue; }
@@ -464,13 +525,28 @@ void MotorView::setCharsAvailable(const QVector<A2lChar> &chars)
 void MotorView::applyRange()
 {
     m_spMax = motorEffectiveMax(m_spHi, m_ceilOk ? m_ceiling : -1);
+    // Speed mode: the slider is rpm; its top is the largest rpm whose table
+    // value stays within the (A2L / firmware) ceiling.
+    if (speedMode())
+        m_spMax = motorRpmMaxForDshot(m_spMax);
     bool clamped = false;
     for (int i = 0; i < kMotors; ++i) {
         // setMaximum may clamp the value; that must never look like a user move.
         const bool over = m_ui[i].slider->value() > m_spMax;
         const QSignalBlocker b1(m_ui[i].slider), b2(m_ui[i].spin);
         m_ui[i].slider->setMaximum(m_spMax);
-        m_ui[i].spin->setMaximum(m_spMax);
+        // setMaximum / setSuffix rewrite the edit text even when nothing changed,
+        // and applyRange runs on every ceiling / mode read-back: only touch the
+        // entry field when the range or the unit really changes, and start a new
+        // unit at STOP so no number is carried into the other unit.
+        const QString suffix = speedMode() ? tr(" rpm") : QString();
+        if (m_ui[i].spin->maximum() != m_spMax)
+            m_ui[i].spin->setMaximum(m_spMax);
+        if (m_ui[i].spin->suffix() != suffix) {
+            m_ui[i].spin->setSuffix(suffix);
+            m_ui[i].spin->setValue(kMotorSliderStop);
+            m_ui[i].spinCaption->setText(speedMode() ? tr("rpm") : tr("DShot"));
+        }
         // The firmware clamp never rewrites CAL_motorManualSp_Mn: while manual is
         // ON, write the clamped position so the firmware holds what is shown
         // (otherwise raising the ceiling later would put the old value on the wire).
@@ -486,6 +562,114 @@ void MotorView::applyRange()
         if (p > m_spMax)
             p = m_spMax;
     updateCeilingUi();
+    updateModeUi();
+}
+
+// DShot value the firmware will command for a slider position: the position
+// itself in throttle mode, table + ceiling in speed mode.
+int MotorView::sliderDshot(int pos) const
+{
+    const int v = motorSliderToDshot(pos, m_spMax);
+    if (!speedMode())
+        return v;
+    return motorSpeedCommand(quint32(v), m_ceilOk ? m_ceiling : -1);
+}
+
+void MotorView::updateModeUi()
+{
+    if (!m_modeLbl)
+        return;
+    const bool usable = m_modeOk && m_connected && !isStale() && m_modeReq < 0;
+    if (!m_modeOk) {
+        m_modeLbl->setText(tr("Unit (CAL_motorSpMode): n/a"));
+        m_modeLbl->setStyleSheet(QStringLiteral("QLabel { color: %1; }").arg(kColGrey.name()));
+    } else if (m_modeReq >= 0) {
+        m_modeLbl->setText(tr("Unit (CAL_motorSpMode): pending..."));
+        m_modeLbl->setStyleSheet(QStringLiteral("QLabel { font-style: italic; }"));
+    } else if (m_mode < 0 || isStale()) {
+        m_modeLbl->setText(tr("Unit (CAL_motorSpMode): --"));
+        m_modeLbl->setStyleSheet(QStringLiteral("QLabel { color: %1; }").arg(kColGrey.name()));
+    } else {
+        m_modeLbl->setText(m_mode == 1 ? tr("Unit (CAL_motorSpMode): SPEED rpm") : tr("Unit (CAL_motorSpMode): THROTTLE"));
+        m_modeLbl->setStyleSheet(QString());
+    }
+    // The checked button is the firmware's read-back, never the operator's click.
+    const bool known = m_modeOk && m_mode >= 0 && m_modeReq < 0 && !isStale();
+    m_modeThrBtn->setChecked(known && m_mode == 0);
+    m_modeRpmBtn->setChecked(known && m_mode == 1);
+    const QString na = tr("firmware without CAL_motorSpMode (throttle only)");
+    m_modeThrBtn->setEnabled(usable && m_mode != 0);
+    m_modeRpmBtn->setEnabled(usable && m_mode != 1);
+    m_modeLbl->setToolTip(m_modeOk ? tr("Firmware read-back of CAL_motorSpMode: unit of the manual setpoints. "
+                                        "THROTTLE = DShot 48..2047; SPEED = rpm, mapped to DShot by the firmware's thrust-rig table. "
+                                        "Default SPEED after every reset.")
+                                   : na);
+    const QString bt = m_modeOk ? tr("Write CAL_motorSpMode. The sliders are stopped first; the tab follows the firmware's read-back.") : na;
+    m_modeThrBtn->setToolTip(bt);
+    m_modeRpmBtn->setToolTip(bt);
+}
+
+// Operator picked a unit. Nothing is believed until read back: sliders go to
+// STOP first (so no value is ever re-read in the other unit), stay disabled
+// while the request is pending, and the range changes only on the read-back.
+void MotorView::onModeClicked(int mode)
+{
+    if (!m_connected || !m_modeOk || m_modeReq >= 0 || (mode != 0 && mode != 1)) {
+        updateModeUi();
+        return;
+    }
+    m_notice.clear();
+    m_flushTimer.stop();
+    for (int &p : m_pending) p = -1;
+    for (int i = 0; i < kMotors; ++i)
+        setSliderSilently(i, kMotorSliderStop);
+    if (m_charsOk && m_state == 2)
+        emit stopAllRequested();   // XcpPanel: purge queued setpoints, priority Sp=0 x4
+    m_modeReq = mode;
+    m_modeTimer.start(1500);
+    emit logMessage(QStringLiteral("[Motors] set setpoint unit CAL_motorSpMode = %1 (%2) requested, sliders stopped")
+                        .arg(mode).arg(mode ? "rpm" : "throttle"));
+    emit writeCharRequested(QStringLiteral("CAL_motorSpMode"), quint32(mode));
+    emit readBackRequested();
+    updateControls();
+    updateBanner();
+}
+
+// Read-back of CAL_motorSpMode (any nonzero value = SPEED, as in the firmware).
+void MotorView::applyMode(quint32 value, bool fresh)
+{
+    if (!m_modeOk)
+        return;
+    const int newMode = motorModeFromRead(value);
+    if (m_modeReq >= 0) {
+        if (!fresh)
+            return;             // a reply to a read issued before our write says nothing about it
+        const int req = m_modeReq;
+        m_modeReq = -1;
+        m_modeTimer.stop();
+        if (newMode == req) {
+            m_notice.clear();
+            emit logMessage(QStringLiteral("[Motors] setpoint unit confirmed by read-back: CAL_motorSpMode = %1").arg(req));
+        } else {
+            m_notice = tr("Unit request %1 not in force: the firmware reads back %2.").arg(req).arg(newMode);
+            emit logMessage(QStringLiteral("[Motors] ") + m_notice);
+        }
+    } else if (newMode != m_mode && m_mode >= 0) {
+        m_notice = tr("Setpoint unit changed outside this tab (CAL_motorSpMode reads %1) - sliders stopped, following the firmware.").arg(newMode);
+        emit logMessage(QStringLiteral("[Motors] CAL_motorSpMode read back %1 (was %2) - following the firmware").arg(newMode).arg(m_mode));
+    }
+    if (newMode != m_mode) {
+        // The unit is about to change under the sliders: stop them first, in
+        // the GUI and (while manual is ON) in the firmware, before re-ranging.
+        m_flushTimer.stop();
+        for (int &p : m_pending) p = -1;
+        for (int i = 0; i < kMotors; ++i)
+            setSliderSilently(i, kMotorSliderStop);
+        if (m_mode >= 0 && m_manual == Manual::On && m_connected && m_charsOk)
+            emit stopAllRequested();
+    }
+    m_mode = newMode;
+    applyRange();
 }
 
 void MotorView::updateCeilingUi()
@@ -577,6 +761,9 @@ void MotorView::setConnected(bool connected)
     m_ceiling = -1;                 // a new connection: the firmware may have reset
     m_ceilReq = -1;
     m_ceilTimer.stop();
+    m_mode = -1;                    // unit unknown until read back (never assumed)
+    m_modeReq = -1;
+    m_modeTimer.stop();
     applyRange();
     if (!connected) {
         // Link gone: firmware goes FAILSAFE and zeroes its side; we just reset ours.
@@ -645,8 +832,8 @@ void MotorView::feedSample(const XcpClient::Measurements &m)
     } else if (m_state == 2 && (prevState != 2 || m_manual == Manual::Unknown) && m_charsOk) {
         emit readBackRequested();   // learn CAL_motorManual / Sp now, not in up to 1 s
     }
-    if (m_ceilOk && m_ceiling < 0 && m_ceilReq < 0 && m_charsOk)
-        emit readBackRequested();   // learn the ceiling at connect, not in up to 1 s
+    if (((m_ceilOk && m_ceiling < 0 && m_ceilReq < 0) || (m_modeOk && m_mode < 0 && m_modeReq < 0)) && m_charsOk)
+        emit readBackRequested();   // learn ceiling / unit at connect, not in up to 1 s
 
     for (int i = 0; i < kMotors; ++i) {
         const MotorIdx &x = m_idx[i];
@@ -755,7 +942,7 @@ void MotorView::showReadoutsStale()
 bool MotorView::manualWritable() const
 {
     return m_connected && m_charsOk && m_readBackProblem.isEmpty() && !isStale() && m_state == 2
-        && (!m_ceilOk || m_ceiling >= 0);
+        && (!m_ceilOk || m_ceiling >= 0) && (!m_modeOk || (m_mode >= 0 && m_modeReq < 0));
 }
 
 bool MotorView::slidersEnabled() const
@@ -778,6 +965,10 @@ QString MotorView::disabledReason() const
         return tr("Arm first (state is %1).").arg(motorStateName(m_state));
     if (m_ceilOk && m_ceiling < 0)
         return tr("Waiting for the CAL_motorSpMax read-back (throttle ceiling unknown).");
+    if (m_modeOk && m_modeReq >= 0)
+        return tr("Waiting for CAL_motorSpMode = %1 to be confirmed by read-back (sliders stopped)...").arg(m_modeReq);
+    if (m_modeOk && m_mode < 0)
+        return tr("Waiting for the CAL_motorSpMode read-back (setpoint unit unknown).");
     if (m_locked)
         return tr("DISARM sent - waiting for the controller to confirm.");
     if (m_pendingOp == Pending::AwaitZeros)
@@ -800,19 +991,25 @@ void MotorView::updateControls()
     m_stopAllBtn->setEnabled(m_connected && m_charsOk);
     m_manualBtn->setEnabled(manualWritable() && m_pendingOp == Pending::None && !m_locked);
     updateCeilingUi();
+    updateModeUi();
 
     const bool sliders = slidersEnabled();
     m_linkAll->setEnabled(sliders);
     for (int i = 0; i < kMotors; ++i) {
         m_ui[i].slider->setEnabled(sliders);
         m_ui[i].spin->setEnabled(sliders);
-        m_ui[i].bar->setMarker(motorBarFraction(motorSliderToDshot(m_ui[i].slider->value(), m_spMax)),
-                               sliders);
+        m_ui[i].setBtn->setEnabled(sliders);
+        const int cmd = sliderDshot(m_ui[i].slider->value());
+        m_ui[i].bar->setMarker(motorBarFraction(cmd), sliders);
+        m_ui[i].cmdLbl->setVisible(speedMode());
+        m_ui[i].cmdLbl->setText(tr("-> DShot %1").arg(cmd, 4));
     }
 
     const QString why = disabledReason();
     QString text = why.isEmpty()
-        ? tr("Manual throttle active: sliders write CAL_motorManualSp_Mn (0 = stop, 48..%1%2).")
+        ? (speedMode()
+               ? tr("Manual speed active: sliders write CAL_motorManualSp_Mn in rpm (0 = stop, 48..%1 rpm%2).")
+               : tr("Manual throttle active: sliders write CAL_motorManualSp_Mn (0 = stop, 48..%1%2)."))
               .arg(m_spMax).arg(m_ceilOk ? tr(", firmware ceiling") : QString())
         : why;
     if (!m_notice.isEmpty())
@@ -889,11 +1086,11 @@ void MotorView::updateBanner()
 
 void MotorView::setSliderSilently(int motor, int pos)
 {
+    // The entry field is deliberately NOT followed: it holds what the operator
+    // typed until the next Set (2026-11-01, rig: read-backs kept overwriting it).
     QSlider *s = m_ui[motor].slider;
-    QSpinBox *b = m_ui[motor].spin;
-    const QSignalBlocker b1(s), b2(b);
+    const QSignalBlocker b1(s);
     s->setValue(pos);
-    b->setValue(pos);
 }
 
 // GUI-only reset: sliders to STOP, manual off, pending writes dropped. Never
@@ -1022,6 +1219,10 @@ void MotorView::onCharsRead(const QMap<QString, quint32> &v, bool fresh)
         applyCeiling(v.value(QStringLiteral("CAL_motorSpMax")), fresh);
         updateControls();
     }
+    if (m_connected && v.contains(QStringLiteral("CAL_motorSpMode"))) {
+        applyMode(v.value(QStringLiteral("CAL_motorSpMode")), fresh);
+        updateControls();
+    }
     if (!m_connected || m_state != 2 || !v.contains(QStringLiteral("CAL_motorManual")))
         return;
     const bool man = v.value(QStringLiteral("CAL_motorManual")) == 1u;
@@ -1115,10 +1316,6 @@ void MotorView::onStopAll()
 
 void MotorView::onSliderChanged(int motor, int pos)
 {
-    {
-        const QSignalBlocker b(m_ui[motor].spin);
-        m_ui[motor].spin->setValue(pos);
-    }
     if (m_linkAll->isChecked() && !m_inLink) {
         m_inLink = true;
         for (int j = 0; j < kMotors; ++j) {
@@ -1134,11 +1331,16 @@ void MotorView::onSliderChanged(int motor, int pos)
     updateControls();
 }
 
-void MotorView::onSpinChanged(int motor, int pos)
+void MotorView::onSetClicked(int motor)
 {
-    // Commit from the spinbox (Enter / arrows): route through the slider so
-    // link-all, pending coalescing and the marker all follow one path.
-    m_ui[motor].slider->setValue(pos);
+    // Commit from the entry field: route through the slider so link-all,
+    // pending coalescing and the marker all follow one path. A value equal to
+    // the slider position would not emit valueChanged, so write it directly.
+    const int pos = m_ui[motor].spin->value();
+    if (m_ui[motor].slider->value() == pos)
+        onSliderChanged(motor, pos);
+    else
+        m_ui[motor].slider->setValue(pos);
 }
 
 void MotorView::flushPending()
@@ -1150,7 +1352,7 @@ void MotorView::flushPending()
             continue;
         const int dshot = motorSliderToDshot(m_pending[i], m_spMax);
         m_pending[i] = -1;
-        if (!ok || !motorDshotWritable(quint32(dshot), m_spMax))
+        if (!ok || !motorSetpointWritable(quint32(dshot), speedMode(), m_spMax))
             continue;
         emit writeCharRequested(spName(i), quint32(dshot));
     }
