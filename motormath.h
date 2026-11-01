@@ -68,8 +68,8 @@ inline constexpr int kMotorRpmMax = 8257;      // last table breakpoint
 
 inline int motorSpeedToDshot(quint32 rpm)
 {
-    static constexpr quint32 kX[] = { 0, 1, 1300, 2629, 3829, 4929, 5929, 6814, 8257 };
-    static constexpr quint32 kY[] = { 0, 48, 200, 400, 600, 800, 1000, 1200, 1600 };
+    static constexpr quint32 kX[] = { 0, 1, 129, 1300, 2629, 3829, 4929, 5929, 6814, 8257 };
+    static constexpr quint32 kY[] = { 0, 48, 48, 200, 400, 600, 800, 1000, 1200, 1600 };
     constexpr int n = int(sizeof(kX) / sizeof(kX[0]));
     if (rpm >= kX[n - 1])
         return int(kY[n - 1]);
@@ -179,8 +179,8 @@ inline bool motorSelfCheck(QString *report)
           !motorDshotWritable(1601, 1600) && motorDshotWritable(1600, 1600) && motorDshotWritable(0, 1600));
 
     check("speed table: 0 -> 0, 1 -> 48", motorSpeedToDshot(0) == 0 && motorSpeedToDshot(1) == 48);
-    check("speed table: 650 -> 123, 1299 -> 199, 1300 -> 200",
-          motorSpeedToDshot(650) == 123 && motorSpeedToDshot(1299) == 199 && motorSpeedToDshot(1300) == 200);
+    check("speed table: 128 -> 48, 129 -> 48, 650 -> 115, 1299 -> 199, 1300 -> 200 (run 6: breakpoint 129 rpm)",
+          motorSpeedToDshot(128) == 48 && motorSpeedToDshot(129) == 48 && motorSpeedToDshot(650) == 115 && motorSpeedToDshot(1299) == 199 && motorSpeedToDshot(1300) == 200);
     check("speed table: 1964 -> 299, 4929 -> 800", motorSpeedToDshot(1964) == 299 && motorSpeedToDshot(4929) == 800);
     check("speed table: 8257 -> 1600, 9000 -> 1600", motorSpeedToDshot(8257) == 1600 && motorSpeedToDshot(9000) == 1600);
     bool mono = true;
