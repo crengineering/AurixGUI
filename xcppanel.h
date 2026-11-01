@@ -265,6 +265,12 @@ private:
     QLabel         *m_logStatus   = nullptr;
     Mf4Writer       m_mf4;
     QVector<int>    m_logSel;            // channel indices selected for logging
+    // Motor setpoint words as logged alongside the DAQ channels: the CAL_motor*
+    // values as READ BACK from the board (held between read-backs, 0 before the
+    // first), so a rig run carries the speed/throttle request next to EscMnRpm
+    // and EscMnDshotCmd (2026-11-01, speed-table validation).
+    QStringList             m_logMotorChars;
+    QMap<QString, quint32>  m_motorLast;
     bool            m_logging     = false;
     QElapsedTimer   m_timeBase;         // running since connect (plot x-axis)
     qint64          m_logStartMs  = 0;
