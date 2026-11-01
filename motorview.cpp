@@ -281,10 +281,14 @@ MotorView::MotorView(QWidget *parent)
         u.spin->setMinimumHeight(32);
         u.spin->setStyleSheet("QSpinBox { border: 1px solid #8a8a8a; border-radius: 3px; padding: 2px 6px; }"
                               "QSpinBox:focus { border: 2px solid #2e86de; }");
-        u.spin->setToolTip(tr("Type the setpoint and press Enter (or use the arrows). Same value as the slider."));
-        u.spinCaption = new QLabel(tr("Set"));
+        u.spin->setToolTip(tr("Type the setpoint, then press Set or Enter. The field is yours: neither the slider "
+                              "nor the firmware read-back overwrites it."));
+        u.spinCaption = new QLabel(tr("DShot"));
         u.spinCaption->setFont(smallMono);
         u.spinCaption->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        u.setBtn = new QPushButton(tr("Set"));
+        u.setBtn->setFocusPolicy(Qt::NoFocus);   // the entry keeps the focus for a repeated Enter
+        u.setBtn->setToolTip(tr("Apply the entered value to this motor (same path as the slider)."));
 
         u.cmdLbl = new QLabel;
         u.cmdLbl->setFont(smallMono);
@@ -338,6 +342,7 @@ MotorView::MotorView(QWidget *parent)
         auto *setRow = new QHBoxLayout;
         setRow->addWidget(u.spinCaption);
         setRow->addWidget(u.spin, 1);
+        setRow->addWidget(u.setBtn);
         col->addLayout(setRow);
         col->addWidget(u.cmdLbl);
         col->addLayout(form);
@@ -346,7 +351,12 @@ MotorView::MotorView(QWidget *parent)
         motorsRow->addWidget(u.box, 1);
 
         connect(u.slider, &QSlider::valueChanged, this, [this, i](int v) { onSliderChanged(i, v); });
-        connect(u.spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, i](int v) { onSpinChanged(i, v); });
+        // Entry field: applied by the Set button or by Enter while the field has
+        // the focus. editingFinished also fires on focus-out; that must not write.
+        connect(u.setBtn, &QPushButton::clicked, this, [this, i] { onSetClicked(i); });
+        connect(u.spin, &QAbstractSpinBox::editingFinished, this, [this, i] {
+            if (m_ui[i].spin->hasFocus()) onSetClicked(i);
+        });
     }
 
     // ---- raw KISS values, collapsed by default --------------------------
@@ -525,9 +535,18 @@ void MotorView::applyRange()
         const bool over = m_ui[i].slider->value() > m_spMax;
         const QSignalBlocker b1(m_ui[i].slider), b2(m_ui[i].spin);
         m_ui[i].slider->setMaximum(m_spMax);
-        m_ui[i].spin->setMaximum(m_spMax);
-        m_ui[i].spin->setSuffix(speedMode() ? tr(" rpm") : QString());
-        m_ui[i].spinCaption->setText(speedMode() ? tr("Set rpm") : tr("Set DShot"));
+        // setMaximum / setSuffix rewrite the edit text even when nothing changed,
+        // and applyRange runs on every ceiling / mode read-back: only touch the
+        // entry field when the range or the unit really changes, and start a new
+        // unit at STOP so no number is carried into the other unit.
+        const QString suffix = speedMode() ? tr(" rpm") : QString();
+        if (m_ui[i].spin->maximum() != m_spMax)
+            m_ui[i].spin->setMaximum(m_spMax);
+        if (m_ui[i].spin->suffix() != suffix) {
+            m_ui[i].spin->setSuffix(suffix);
+            m_ui[i].spin->setValue(kMotorSliderStop);
+            m_ui[i].spinCaption->setText(speedMode() ? tr("rpm") : tr("DShot"));
+        }
         // The firmware clamp never rewrites CAL_motorManualSp_Mn: while manual is
         // ON, write the clamped position so the firmware holds what is shown
         // (otherwise raising the ceiling later would put the old value on the wire).
@@ -979,6 +998,7 @@ void MotorView::updateControls()
     for (int i = 0; i < kMotors; ++i) {
         m_ui[i].slider->setEnabled(sliders);
         m_ui[i].spin->setEnabled(sliders);
+        m_ui[i].setBtn->setEnabled(sliders);
         const int cmd = sliderDshot(m_ui[i].slider->value());
         m_ui[i].bar->setMarker(motorBarFraction(cmd), sliders);
         m_ui[i].cmdLbl->setVisible(speedMode());
@@ -1066,11 +1086,11 @@ void MotorView::updateBanner()
 
 void MotorView::setSliderSilently(int motor, int pos)
 {
+    // The entry field is deliberately NOT followed: it holds what the operator
+    // typed until the next Set (2026-11-01, rig: read-backs kept overwriting it).
     QSlider *s = m_ui[motor].slider;
-    QSpinBox *b = m_ui[motor].spin;
-    const QSignalBlocker b1(s), b2(b);
+    const QSignalBlocker b1(s);
     s->setValue(pos);
-    b->setValue(pos);
 }
 
 // GUI-only reset: sliders to STOP, manual off, pending writes dropped. Never
@@ -1296,10 +1316,6 @@ void MotorView::onStopAll()
 
 void MotorView::onSliderChanged(int motor, int pos)
 {
-    {
-        const QSignalBlocker b(m_ui[motor].spin);
-        m_ui[motor].spin->setValue(pos);
-    }
     if (m_linkAll->isChecked() && !m_inLink) {
         m_inLink = true;
         for (int j = 0; j < kMotors; ++j) {
@@ -1315,11 +1331,16 @@ void MotorView::onSliderChanged(int motor, int pos)
     updateControls();
 }
 
-void MotorView::onSpinChanged(int motor, int pos)
+void MotorView::onSetClicked(int motor)
 {
-    // Commit from the spinbox (Enter / arrows): route through the slider so
-    // link-all, pending coalescing and the marker all follow one path.
-    m_ui[motor].slider->setValue(pos);
+    // Commit from the entry field: route through the slider so link-all,
+    // pending coalescing and the marker all follow one path. A value equal to
+    // the slider position would not emit valueChanged, so write it directly.
+    const int pos = m_ui[motor].spin->value();
+    if (m_ui[motor].slider->value() == pos)
+        onSliderChanged(motor, pos);
+    else
+        m_ui[motor].slider->setValue(pos);
 }
 
 void MotorView::flushPending()

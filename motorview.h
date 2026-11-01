@@ -83,7 +83,8 @@ private:
                   *kRpmLbl = nullptr, *kErpmLbl = nullptr, *tlmLbl = nullptr;
         MotorBar  *bar = nullptr;
         QSlider   *slider = nullptr;
-        QSpinBox  *spin = nullptr;
+        QSpinBox  *spin = nullptr;      // direct entry: free text, applied by setBtn / Enter only
+        QPushButton *setBtn = nullptr;
     };
 
     enum class Manual { Unknown, Off, On };                 // as read back from the firmware
@@ -98,7 +99,7 @@ private:
     int  sliderDshot(int pos) const;      // DShot the firmware will command for a slider position
     void updateCeilingUi();
     void onSliderChanged(int motor, int pos);
-    void onSpinChanged(int motor, int pos);
+    void onSetClicked(int motor);          // apply the entry field to the slider (= write)
     void onArmClicked();
     void onManualClicked(bool on);
     void onStopAll();
