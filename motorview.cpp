@@ -273,9 +273,18 @@ MotorView::MotorView(QWidget *parent)
         u.spin->setValue(kMotorSliderStop);
         u.spin->setSpecialValueText(tr("STOP"));
         u.spin->setKeyboardTracking(false);   // commit on Enter / focus-out / arrows
-        u.spin->setFont(mono);
+        u.spin->setFont(bigMono);
         u.spin->setAlignment(Qt::AlignRight);
         u.spin->setFocusPolicy(Qt::ClickFocus);
+        // 2026-11-01: the flat default look was not recognised as an input field on
+        // the rig; a framed, taller box with a caption makes the direct entry visible.
+        u.spin->setMinimumHeight(32);
+        u.spin->setStyleSheet("QSpinBox { border: 1px solid #8a8a8a; border-radius: 3px; padding: 2px 6px; }"
+                              "QSpinBox:focus { border: 2px solid #2e86de; }");
+        u.spin->setToolTip(tr("Type the setpoint and press Enter (or use the arrows). Same value as the slider."));
+        u.spinCaption = new QLabel(tr("Set"));
+        u.spinCaption->setFont(smallMono);
+        u.spinCaption->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
         u.cmdLbl = new QLabel;
         u.cmdLbl->setFont(smallMono);
@@ -326,7 +335,10 @@ MotorView::MotorView(QWidget *parent)
         col->addWidget(u.rpmLbl);
         col->addWidget(u.rpmCaption);
         col->addLayout(barRow, 1);
-        col->addWidget(u.spin);
+        auto *setRow = new QHBoxLayout;
+        setRow->addWidget(u.spinCaption);
+        setRow->addWidget(u.spin, 1);
+        col->addLayout(setRow);
         col->addWidget(u.cmdLbl);
         col->addLayout(form);
         col->addLayout(aliveRow);
@@ -515,6 +527,7 @@ void MotorView::applyRange()
         m_ui[i].slider->setMaximum(m_spMax);
         m_ui[i].spin->setMaximum(m_spMax);
         m_ui[i].spin->setSuffix(speedMode() ? tr(" rpm") : QString());
+        m_ui[i].spinCaption->setText(speedMode() ? tr("Set rpm") : tr("Set DShot"));
         // The firmware clamp never rewrites CAL_motorManualSp_Mn: while manual is
         // ON, write the clamped position so the firmware holds what is shown
         // (otherwise raising the ceiling later would put the old value on the wire).

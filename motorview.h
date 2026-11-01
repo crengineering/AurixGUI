@@ -79,7 +79,7 @@ private:
         QLabel    *rpmLbl = nullptr, *rpmCaption = nullptr, *erpmLbl = nullptr,
                   *tempLbl = nullptr, *dshotLbl = nullptr, *countsLbl = nullptr,
                   *aliveLamp = nullptr, *aliveLbl = nullptr,
-                  *rawLbl = nullptr, *cmdLbl = nullptr,
+                  *rawLbl = nullptr, *cmdLbl = nullptr, *spinCaption = nullptr,
                   *kRpmLbl = nullptr, *kErpmLbl = nullptr, *tlmLbl = nullptr;
         MotorBar  *bar = nullptr;
         QSlider   *slider = nullptr;
