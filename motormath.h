@@ -104,6 +104,16 @@ inline int motorSpeedCommand(quint32 rpm, int ceiling)
 // nonzero value as SPEED and does not validate it, so neither do we.
 inline int motorModeFromRead(quint32 v) { return v != 0 ? 1 : 0; }
 
+// Write gate for CAL_motorManualSp_Mn in the unit the firmware will read it:
+// throttle mode keeps the DShot rule (0, or 48..max; 1..47 are commands),
+// speed mode is 0..kMotorRpmMax rpm (the firmware maps 1..47 rpm to >= 48 and
+// clamps above the table itself). 2026-11-01: the DShot rule applied to rpm
+// silently dropped every request above 2047 rpm (DShot 312 at most).
+inline bool motorSetpointWritable(quint32 v, bool speedMode, int maxDshot = kMotorDshotMax)
+{
+    return speedMode ? v <= quint32(kMotorRpmMax) : motorDshotWritable(v, maxDshot);
+}
+
 // EscMnDshotCmd -> 0..1 bar fill (fraction of 2047). Garbage clamps, never NaN.
 inline double motorBarFraction(double dshot)
 {
@@ -189,6 +199,12 @@ inline bool motorSelfCheck(QString *report)
           motorSpeedCommand(8257, 1000) == 1000 && motorSpeedCommand(4929, 1600) == 800 && motorSpeedCommand(0, 1000) == 0);
     check("mode read-back: 0 throttle, anything else speed",
           motorModeFromRead(0) == 0 && motorModeFromRead(1) == 1 && motorModeFromRead(7) == 1);
+    check("setpoint gate, speed mode: 0 / 47 / 2048 / 8257 writable, 8258 not",
+          motorSetpointWritable(0, true) && motorSetpointWritable(47, true) && motorSetpointWritable(2048, true)
+          && motorSetpointWritable(8257, true) && !motorSetpointWritable(8258, true));
+    check("setpoint gate, throttle mode: DShot rule unchanged (47 / 2048 refused, 0 / 48 / 2047 pass)",
+          !motorSetpointWritable(47, false) && !motorSetpointWritable(2048, false)
+          && motorSetpointWritable(0, false) && motorSetpointWritable(48, false) && motorSetpointWritable(2047, false));
 
     check("bar 0 -> 0", motorBarFraction(0) == 0.0);
     check("bar 2047 -> 1", motorBarFraction(2047) == 1.0);

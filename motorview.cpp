@@ -1318,7 +1318,7 @@ void MotorView::flushPending()
             continue;
         const int dshot = motorSliderToDshot(m_pending[i], m_spMax);
         m_pending[i] = -1;
-        if (!ok || !motorDshotWritable(quint32(dshot), m_spMax))
+        if (!ok || !motorSetpointWritable(quint32(dshot), speedMode(), m_spMax))
             continue;
         emit writeCharRequested(spName(i), quint32(dshot));
     }

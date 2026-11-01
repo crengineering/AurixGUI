@@ -40,6 +40,9 @@ public:
 
     void setAvailable(const QVector<A2lMeas> &meas);
     void setCharsAvailable(const QVector<A2lChar> &chars);
+    // Unit of CAL_motorManualSp_Mn as confirmed by read-back: true = rpm (speed mode).
+    // XcpPanel gates setpoint writes with it, so it must be public.
+    bool speedMode() const { return m_modeOk && m_mode == 1; }
 
 public slots:
     void setConnected(bool connected);
@@ -92,7 +95,6 @@ private:
     void applyMode(quint32 value, bool fresh);
     void onModeClicked(int mode);
     void updateModeUi();
-    bool speedMode() const { return m_modeOk && m_mode == 1; }
     int  sliderDshot(int pos) const;      // DShot the firmware will command for a slider position
     void updateCeilingUi();
     void onSliderChanged(int motor, int pos);

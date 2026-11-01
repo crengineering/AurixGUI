@@ -1933,9 +1933,16 @@ void XcpPanel::writeMotorChar(const QString &name, quint32 value)
         m_log->appendPlainText(QString("[Motors: not connected - write of %1 skipped]").arg(name));
         return;
     }
-    if (name.startsWith(QLatin1String("CAL_motorManualSp_")) && !motorDshotWritable(value)) {
-        m_log->appendPlainText(QString("[Motors: refused %1 = %2 (DShot 1..47 are commands)]").arg(name).arg(value));
-        return;
+    if (name.startsWith(QLatin1String("CAL_motorManualSp_"))) {
+        // The gate must use the unit the firmware will read: rpm in speed mode
+        // (confirmed read-back of CAL_motorSpMode), DShot otherwise.
+        const bool speed = m_motorView && m_motorView->speedMode();
+        if (!motorSetpointWritable(value, speed)) {
+            m_log->appendPlainText(speed
+                ? QString("[Motors: refused %1 = %2 (speed mode: 0..%3 rpm)]").arg(name).arg(value).arg(kMotorRpmMax)
+                : QString("[Motors: refused %1 = %2 (DShot 1..47 are commands)]").arg(name).arg(value));
+            return;
+        }
     }
     if (motorIsCeilingChar(name) && !motorCeilingValid(value)) {
         m_log->appendPlainText(QString("[Motors: refused %1 = %2 (ceiling must be 48..2047)]").arg(name).arg(value));
