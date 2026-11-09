@@ -54,6 +54,12 @@ constexpr int     POLL_MS       = 100;  // 10 Hz
 // DFLASH. The master writes SAVE/DFLT into the command word, the firmware
 // executes it in its 100 ms task and clears the word back to 0 (handshake).
 constexpr quint32 XCP_NVM_ADDR    = 0x70030200;
+// Every A2L characteristic in the same 0x100 block as this one (the Xcp_FusionCal
+// block: fusion gains, mag cal, notch/low-pass words) is logged to the MF4 as a
+// read-back channel (float32) next to the CAL_motor* words, so a bench run shows
+// when each setting was active. The A2L has no block object, so the block is
+// found through this anchor; new words in the block need no GUI change.
+constexpr const char *logTuningAnchor = "FusKpAccel";
 constexpr quint32 XCP_NVM_SIZE    = 0x100;        // block spacing, see A2lModel
 constexpr quint32 NVM_CMD_ADDR    = XCP_NVM_ADDR + 0x04;
 constexpr quint32 NVM_CMD_SAVE    = 0x45564153;   // "SAVE"
@@ -1466,6 +1472,9 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
         }
         for (const QString &n : m_logMotorChars)
             values.append(double(m_motorLast.value(n, 0u)));
+        const qint64 nowMs = m_timeBase.elapsed();
+        for (int i = 0; i < m_logTunChars.size(); ++i)
+            values.append(m_logTunMs[i] >= 0 && nowMs - m_logTunMs[i] <= 1000 ? m_logTunVal[i] : qQNaN());
         m_mf4.append(double(m_timeBase.elapsed() - m_logStartMs) / 1000.0, values);
         updateLogStatus();
     }
@@ -1560,6 +1569,35 @@ void XcpPanel::startLogging()
             }
         }
     }
+    // Tuning words: all chars of the anchor's 0x100 block (see logTuningAnchor),
+    // polled while logging (one <= 60 B chunk per 100 ms tick, round-robin) and
+    // stored as float32 read-back values; NaN = not read yet or no reply for > 1 s.
+    m_logTunChars.clear();
+    m_logTunChunk = 0;
+    quint32 tunBlock = 0;
+    bool haveBlock = false;
+    for (const A2lChar &c : m_chars)
+        if (c.name == QLatin1String(logTuningAnchor)) {
+            tunBlock = c.addr & 0xFFFFFF00u;
+            haveBlock = true;
+        }
+    for (const A2lChar &c : m_chars)
+        if (haveBlock && (c.addr & 0xFFFFFF00u) == tunBlock) {
+            m_logTunChars.append(c);
+            cfg.append({c.name, c.unit, true});
+        }
+    m_logTunVal.fill(qQNaN(), m_logTunChars.size());
+    m_logTunMs.fill(-1, m_logTunChars.size());
+    m_logTunSentMs = -1;
+    if (!m_logTunChars.isEmpty()) {
+        if (!m_logTunTimer) {
+            m_logTunTimer = new QTimer(this);
+            m_logTunTimer->setInterval(100);
+            connect(m_logTunTimer, &QTimer::timeout, this, &XcpPanel::pollTuningWords);
+        }
+        m_logTunTimer->start();
+        pollTuningWords();
+    }
     m_mf4.begin(cfg);
 
     m_logStartMs = m_timeBase.elapsed();
@@ -1574,6 +1612,8 @@ void XcpPanel::startLogging()
 void XcpPanel::stopLogging()
 {
     m_logging = false;
+    if (m_logTunTimer)
+        m_logTunTimer->stop();
     m_logStartBtn->setEnabled(m_client->isConnected());
     m_logStopBtn->setEnabled(false);
     m_logSaveBtn->setEnabled(m_mf4.count() > 0);
@@ -1726,12 +1766,10 @@ void XcpPanel::readCalibration()
             lo = qMin(lo, c.addr);
             hi = qMax(hi, c.addr + quint32(a2lTypeSize(c.type)));
         }
-        if (hi > lo) {
-            quint32 span = hi - lo;
-            if (span > 63u)
-                span = 63u;         // SHORT_UPLOAD payload cap
-            m_client->readMemory(lo, quint8(span));
-        }
+        // SHORT_UPLOAD payload cap is 63 bytes; the FusionCal block is 100 bytes,
+        // so read it in chunks. A char never straddles a chunk (4-aligned, 60 B).
+        for (quint32 a = lo; a < hi; a += 60u)
+            m_client->readMemory(a, quint8(qMin(60u, hi - a)));
     }
 }
 
@@ -1841,6 +1879,14 @@ void XcpPanel::onMemoryRead(quint32 address, const QByteArray &data)
         return;
     }
 
+    captureTuningRead(address, data);
+    if (m_logTunSentMs >= 0 && address == m_logTunLo && quint32(data.size()) == m_logTunLen) {
+        // Reply to the logging poll: it feeds the log only. Refreshing the
+        // Calibration cells here would overwrite a value the user is typing
+        // before the Write button sends it.
+        m_logTunSentMs = -1;
+        return;
+    }
     if (handleMotorRead(address, data))
         return;
 
@@ -2010,6 +2056,53 @@ void XcpPanel::stopAllMotors()
     for (const A2lChar &c : m_chars)
         if (motorIsSetpointChar(c.name))
             writeCharByName(c.name, 0, XcpClient::WriteMode::Priority);
+}
+
+// While logging: one SHORT_UPLOAD over the logged tuning words (window from the
+// A2L), every 100 ms. Replies are decoded in captureTuningRead().
+void XcpPanel::pollTuningWords()
+{
+    if (!m_logging || !m_client->isConnected() || m_logTunChars.isEmpty())
+        return;
+    quint32 lo = 0xFFFFFFFFu, hi = 0;
+    for (const A2lChar &c : m_logTunChars) {
+        lo = qMin(lo, c.addr);
+        hi = qMax(hi, c.addr + quint32(a2lTypeSize(c.type)));
+    }
+    // One poll in flight at most (a lost reply is forgotten after 500 ms), so the
+    // poll can never build a backlog in front of a user write.
+    if (m_logTunSentMs >= 0 && m_timeBase.elapsed() - m_logTunSentMs < 500)
+        return;
+    // Window split into 56 B chunks (4-aligned, a char never straddles one;
+    // 56 != readCalibration()'s 60 so a poll reply is told from a manual read),
+    // one chunk per tick -> 10 requests/s in total, each word refreshed at
+    // 10 Hz / chunks (5 Hz for the 104 B block).
+    const quint32 nChunks = (hi - lo + 55u) / 56u;
+    const quint32 a = lo + (m_logTunChunk % nChunks) * 56u;
+    m_logTunChunk = (m_logTunChunk + 1) % nChunks;
+    m_logTunLo     = a;
+    m_logTunSentMs = m_timeBase.elapsed();
+    m_client->readMemory(a, quint8(m_logTunLen = qMin(56u, hi - a)));
+}
+
+void XcpPanel::captureTuningRead(quint32 address, const QByteArray &data)
+{
+    for (int i = 0; i < m_logTunChars.size(); ++i) {
+        const A2lChar &c = m_logTunChars[i];
+        if (c.addr < address || int(c.addr - address) + a2lTypeSize(c.type) > data.size())
+            continue;
+        const uchar *p = reinterpret_cast<const uchar *>(data.constData()) + (c.addr - address);
+        double v = qQNaN();
+        switch (c.type) {
+        case A2lType::Float32: { float f; memcpy(&f, p, 4); v = double(f); break; }
+        case A2lType::Uint32:  v = double(qFromLittleEndian<quint32>(p)); break;
+        case A2lType::Sint32:  v = double(qFromLittleEndian<qint32>(p)); break;
+        case A2lType::Uint16:  v = double(qFromLittleEndian<quint16>(p)); break;
+        case A2lType::Uint8:   v = double(*p); break;
+        }
+        m_logTunVal[i] = v;
+        m_logTunMs[i]  = m_timeBase.elapsed();
+    }
 }
 
 // One SHORT_UPLOAD over CAL_motorCmd .. CAL_motorManualSp_M4 (window from the

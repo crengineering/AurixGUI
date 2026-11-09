@@ -64,6 +64,8 @@ lands.
 | Motors tab: `CAL_motorCmd`/`CAL_motorManual`/`CAL_motorManualSp_M1..4` (`Xcp_Cal`) and the `Xcp_Esc` block (`EscMotorState`, `EscM<n>DshotCmd/BidirRpm/BidirErpm/BidirOk/Alive/…`), motor.c state machine with XCP-link failsafe | this commit (Motors tab, `motorview.*`/`motormath.h`; an A2L without them shows "not in this A2L" and stays inert) | 2026-10-17 |
 | DShot throttle ceiling (`CAL_motorSpMax`, `Xcp_Cal` 0x50, fw PR #28) | commit `2027c6e` (Motors tab ceiling field, `motorview.*`; older GUI still works but cannot raise the ceiling above 1600 without the Calibration tab) | 2026-10-19 |
 | Manual setpoint unit (`CAL_motorSpMode`, `Xcp_Cal` 0x52, fw 1.19.29): throttle or rpm sliders | branch `feat/motor-speed-mode` (Motors tab unit switch, entry field with Set, setpoint words in the MF4; `motorview.*`/`motormath.h`/`xcppanel.*`; older GUI still works, but against fw 1.19.29 (default SPEED) its slider values are read as rpm, i.e. far less thrust than shown) | 2026-10-31 |
+| Notch tuning words (`NotchQ`, `NotchEnable`, `Xcp_FusionCal` 100 B, branch `feature/rpm_notch`) logged to MF4 | branch `feat/log-notch-cal` (see `git log`) | 2026-11-09 |
+
 
 ![Motors tab: ARMED banner, manual-throttle switch, four motor columns with throttle slider, DShot value and rpm, bidirectional-DShot and KISS telemetry blocks underneath](docs/img/motor-tab.png)
 
