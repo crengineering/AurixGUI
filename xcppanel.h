@@ -275,6 +275,8 @@ private:
     QVector<double>         m_logTunVal;
     QVector<qint64>         m_logTunMs;
     QTimer                 *m_logTunTimer = nullptr;
+    quint32                 m_logTunLo = 0;        // window of the poll in flight
+    qint64                  m_logTunSentMs = -1;   // -1 = no poll in flight
     void                    captureTuningRead(quint32 address, const QByteArray &data);
     void                    pollTuningWords();
     QMap<QString, quint32>  m_motorLast;

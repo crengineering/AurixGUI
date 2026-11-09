@@ -1580,6 +1580,7 @@ void XcpPanel::startLogging()
             }
     m_logTunVal.fill(qQNaN(), m_logTunChars.size());
     m_logTunMs.fill(-1, m_logTunChars.size());
+    m_logTunSentMs = -1;
     if (!m_logTunChars.isEmpty()) {
         if (!m_logTunTimer) {
             m_logTunTimer = new QTimer(this);
@@ -1870,7 +1871,14 @@ void XcpPanel::onMemoryRead(quint32 address, const QByteArray &data)
         return;
     }
 
-    captureTuningRead(address, data);   // non-exclusive: the row refresh below still runs
+    captureTuningRead(address, data);
+    if (m_logTunSentMs >= 0 && address == m_logTunLo) {
+        // Reply to the logging poll: it feeds the log only. Refreshing the
+        // Calibration cells here would overwrite a value the user is typing
+        // before the Write button sends it.
+        m_logTunSentMs = -1;
+        return;
+    }
     if (handleMotorRead(address, data))
         return;
 
@@ -2055,6 +2063,12 @@ void XcpPanel::pollTuningWords()
     }
     if (hi - lo > 63u)
         return;                 // would not fit one SHORT_UPLOAD; channels stay NaN
+    // One poll in flight at most (a lost reply is forgotten after 500 ms), so the
+    // poll can never build a backlog in front of a user write.
+    if (m_logTunSentMs >= 0 && m_timeBase.elapsed() - m_logTunSentMs < 500)
+        return;
+    m_logTunLo     = lo;
+    m_logTunSentMs = m_timeBase.elapsed();
     m_client->readMemory(lo, quint8(hi - lo));
 }
 
