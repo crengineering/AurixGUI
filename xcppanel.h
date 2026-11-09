@@ -270,6 +270,13 @@ private:
     // first), so a rig run carries the speed/throttle request next to EscMnRpm
     // and EscMnDshotCmd (2026-11-01, speed-table validation).
     QStringList             m_logMotorChars;
+    // Tuning words logged as read-back (see logTuningChars): window, chars, last value + age.
+    QVector<A2lChar>        m_logTunChars;
+    QVector<double>         m_logTunVal;
+    QVector<qint64>         m_logTunMs;
+    QTimer                 *m_logTunTimer = nullptr;
+    void                    captureTuningRead(quint32 address, const QByteArray &data);
+    void                    pollTuningWords();
     QMap<QString, quint32>  m_motorLast;
     bool            m_logging     = false;
     QElapsedTimer   m_timeBase;         // running since connect (plot x-axis)

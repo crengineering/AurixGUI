@@ -218,3 +218,4 @@ into the memory of a running ECU (calibration values, GPIO and PWM outputs) and
 can therefore put attached hardware into an unintended state. Not functionally
 safe, not certified. Use at your own risk — see the warranty and liability
 disclaimer in [`LICENSE`](LICENSE).
+| Notch tuning words (`NotchQ`, `NotchEnable`, `Xcp_FusionCal` 100 B, branch `feature/rpm_notch`) logged to MF4 | branch `feat/log-notch-cal` (see `git log`) | 2026-11-09 |
