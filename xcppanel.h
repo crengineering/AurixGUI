@@ -276,6 +276,8 @@ private:
     QVector<qint64>         m_logTunMs;
     QTimer                 *m_logTunTimer = nullptr;
     quint32                 m_logTunLo = 0;        // window of the poll in flight
+    quint32                 m_logTunLen = 0;       // length of the poll in flight
+    quint32                 m_logTunChunk = 0;     // next chunk of the window
     qint64                  m_logTunSentMs = -1;   // -1 = no poll in flight
     void                    captureTuningRead(quint32 address, const QByteArray &data);
     void                    pollTuningWords();
