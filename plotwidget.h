@@ -31,6 +31,10 @@ public:
     void clearData();
     void clearSeries();      // drop all series (used when the A2L is reloaded)
 
+    // Default visible time window (also what resetView() returns to). The
+    // Attitude tab's setpoint-vs-actual plots show a few seconds, not 60.
+    void setWindowSeconds(double seconds);
+
     // Back to the default view: follow the live edge on X, autoscale on Y.
     void resetView();
 
@@ -67,6 +71,7 @@ private:
 
     QVector<Series> m_series;
     double          m_tLatest = 0.0;
+    double          m_defaultSpanS = WINDOW_S;
 
     // X (time) view state.
     double m_xSpanS       = WINDOW_S; // zoom level, in seconds

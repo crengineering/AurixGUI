@@ -65,9 +65,18 @@ void PlotWidget::clearSeries()
     update();
 }
 
+void PlotWidget::setWindowSeconds(double seconds)
+{
+    if (!std::isfinite(seconds))
+        return;
+    m_defaultSpanS = qBound(MIN_SPAN_S, seconds, MAX_SPAN_S);
+    m_xSpanS       = m_defaultSpanS;
+    update();
+}
+
 void PlotWidget::resetView()
 {
-    m_xSpanS       = WINDOW_S;
+    m_xSpanS       = m_defaultSpanS;
     m_followLatest = true;
     m_yFixed       = false;
     update();
