@@ -53,6 +53,9 @@ add_executable(SerialMonitor
     motorview.cpp
     motorview.h
     motormath.h
+    ctrlview.cpp
+    ctrlview.h
+    ctrlmath.h
     $<$<BOOL:${WIN32}>:app.rc>
 )
 
@@ -183,3 +186,32 @@ add_executable(xcp_queue_selfcheck EXCLUDE_FROM_ALL
 target_include_directories(xcp_queue_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(xcp_queue_selfcheck PRIVATE Qt6::Core Qt6::Network)
 add_test(NAME xcp_queue_selfcheck COMMAND xcp_queue_selfcheck)
+
+# Pure logic of the flight-controller panel (CAL_ctrl* read-back windows and
+# parser, calibration read chunks for the 148 B Xcp_Cal block, CtrlStatus decode,
+# write gates, yaw unwrap) -- header-only ctrlmath.h, no display, no QApplication.
+add_executable(ctrl_selfcheck EXCLUDE_FROM_ALL
+    tools/ctrl_selfcheck_main.cpp
+    ctrlmath.h
+)
+target_include_directories(ctrl_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(ctrl_selfcheck PRIVATE Qt6::Core)
+add_test(NAME ctrl_selfcheck COMMAND ctrl_selfcheck)
+
+# Widget-level self-check of the controller panel (Attitude tab): CtrlView on the
+# offscreen platform with a synthetic A2L and synthetic read-backs (no XCP, no
+# board). Links ctrlview.cpp + plotwidget.cpp + a2lmodel.cpp, not xcppanel.cpp.
+add_executable(ctrl_view_selfcheck EXCLUDE_FROM_ALL
+    tools/ctrl_view_selfcheck_main.cpp
+    ctrlview.cpp
+    ctrlview.h
+    ctrlmath.h
+    motormath.h
+    plotwidget.cpp
+    plotwidget.h
+    a2lmodel.cpp
+    a2lmodel.h
+)
+target_include_directories(ctrl_view_selfcheck PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(ctrl_view_selfcheck PRIVATE Qt6::Widgets Qt6::Network)
+add_test(NAME ctrl_view_selfcheck COMMAND ctrl_view_selfcheck)

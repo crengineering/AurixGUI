@@ -71,6 +71,20 @@ jobs:
         shell: cmd
         run: build\Release\xcp_queue_selfcheck.exe
 
+      - name: Build controller panel logic self-check (headless)
+        run: cmake --build build --config Release --target ctrl_selfcheck
+
+      - name: Run controller panel logic self-check
+        shell: cmd
+        run: build\Release\ctrl_selfcheck.exe
+
+      - name: Build controller panel widget self-check (offscreen)
+        run: cmake --build build --config Release --target ctrl_view_selfcheck
+
+      - name: Run controller panel widget self-check
+        shell: cmd
+        run: build\Release\ctrl_view_selfcheck.exe
+
       - name: Deploy Qt DLLs
         run: windeployqt --release build/Release/SerialMonitor.exe
 

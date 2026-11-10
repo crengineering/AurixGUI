@@ -19,52 +19,64 @@ if not exist "%NINJA%" (
 
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
-echo [1/8] Configuring...
+echo [1/10] Configuring...
 "%CMAKE%" -S "%~dp0." -B "%BUILD_DIR%" -G Ninja ^
     -DCMAKE_MAKE_PROGRAM="%NINJA%" ^
     -DCMAKE_PREFIX_PATH=C:\msys64\ucrt64 ^
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 if %ERRORLEVEL% neq 0 ( echo Configure failed. & exit /b %ERRORLEVEL% )
 
-echo [2/8] Building...
+echo [2/10] Building...
 "%CMAKE%" --build "%BUILD_DIR%"
 if %ERRORLEVEL% neq 0 ( echo Build failed. & exit /b %ERRORLEVEL% )
 
-echo [3/8] Attitude handedness self-check (SWE1-GUI-001 evidence, headless)...
+echo [3/10] Attitude handedness self-check (SWE1-GUI-001 evidence, headless)...
 "%CMAKE%" --build "%BUILD_DIR%" --target attitude_selfcheck
 if %ERRORLEVEL% neq 0 ( echo Attitude self-check build failed. & exit /b %ERRORLEVEL% )
 "%BUILD_DIR%\attitude_selfcheck.exe"
 if %ERRORLEVEL% neq 0 ( echo Attitude self-check FAILED - handedness math regression. & exit /b %ERRORLEVEL% )
 
-echo [4/8] Position panel self-check (SWE1-GUI-006/-007/-008 evidence, headless)...
+echo [4/10] Position panel self-check (SWE1-GUI-006/-007/-008 evidence, headless)...
 "%CMAKE%" --build "%BUILD_DIR%" --target position_selfcheck
 if %ERRORLEVEL% neq 0 ( echo Position self-check build failed. & exit /b %ERRORLEVEL% )
 "%BUILD_DIR%\position_selfcheck.exe"
 if %ERRORLEVEL% neq 0 ( echo Position self-check FAILED - position math regression. & exit /b %ERRORLEVEL% )
 
-echo [5/8] Diagnostics word-grouping self-check (headless)...
+echo [5/10] Diagnostics word-grouping self-check (headless)...
 "%CMAKE%" --build "%BUILD_DIR%" --target diag_selfcheck
 if %ERRORLEVEL% neq 0 ( echo Diagnostics self-check build failed. & exit /b %ERRORLEVEL% )
 "%BUILD_DIR%\diag_selfcheck.exe"
 if %ERRORLEVEL% neq 0 ( echo Diagnostics self-check FAILED - word-grouping regression. & exit /b %ERRORLEVEL% )
 
-echo [6/8] Motors slider-mapping self-check (headless)...
+echo [6/10] Motors slider-mapping self-check (headless)...
 "%CMAKE%" --build "%BUILD_DIR%" --target motor_selfcheck
 if %ERRORLEVEL% neq 0 ( echo Motor self-check build failed. & exit /b %ERRORLEVEL% )
 "%BUILD_DIR%\motor_selfcheck.exe"
 if %ERRORLEVEL% neq 0 ( echo Motor self-check FAILED - slider/DShot mapping regression. & exit /b %ERRORLEVEL% )
 
-echo [7/8] Motors tab safety self-check (widget level, offscreen)...
+echo [7/10] Motors tab safety self-check (widget level, offscreen)...
 "%CMAKE%" --build "%BUILD_DIR%" --target motor_view_selfcheck
 if %ERRORLEVEL% neq 0 ( echo Motor view self-check build failed. & exit /b %ERRORLEVEL% )
 "%BUILD_DIR%\motor_view_selfcheck.exe"
 if %ERRORLEVEL% neq 0 ( echo Motor view self-check FAILED - Motors tab safety regression. & exit /b %ERRORLEVEL% )
 
-echo [8/8] XCP queue + motor read-back parser self-check (headless)...
+echo [8/10] XCP queue + motor read-back parser self-check (headless)...
 "%CMAKE%" --build "%BUILD_DIR%" --target xcp_queue_selfcheck
 if %ERRORLEVEL% neq 0 ( echo XCP queue self-check build failed. & exit /b %ERRORLEVEL% )
 "%BUILD_DIR%\xcp_queue_selfcheck.exe"
 if %ERRORLEVEL% neq 0 ( echo XCP queue self-check FAILED - transport queue regression. & exit /b %ERRORLEVEL% )
+
+echo [9/10] Controller panel logic self-check (headless)...
+"%CMAKE%" --build "%BUILD_DIR%" --target ctrl_selfcheck
+if %ERRORLEVEL% neq 0 ( echo Controller self-check build failed. & exit /b %ERRORLEVEL% )
+"%BUILD_DIR%\ctrl_selfcheck.exe"
+if %ERRORLEVEL% neq 0 ( echo Controller self-check FAILED - read-back window / gate regression. & exit /b %ERRORLEVEL% )
+
+echo [10/10] Controller panel self-check (widget level, offscreen)...
+"%CMAKE%" --build "%BUILD_DIR%" --target ctrl_view_selfcheck
+if %ERRORLEVEL% neq 0 ( echo Controller view self-check build failed. & exit /b %ERRORLEVEL% )
+"%BUILD_DIR%\ctrl_view_selfcheck.exe"
+if %ERRORLEVEL% neq 0 ( echo Controller view self-check FAILED - controller panel regression. & exit /b %ERRORLEVEL% )
 
 echo.
 echo Build successful: %BUILD_DIR%\SerialMonitor.exe
