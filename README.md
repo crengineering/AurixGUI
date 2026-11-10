@@ -38,7 +38,7 @@ link rate, the sensor lamps and the actuator state.*
 | **Calibration** | Read and write calibration values (RAM block) |
 | **DFLASH** | Read, write and verify persistent parameters — every A2L CHARACTERISTIC inside the Xcp_Nvm block, built at runtime like the Calibration tab |
 | **Plot & Log** | Freely configurable plots, channel selection, recording as **MF4**. When the A2L has the motor words, every recording also carries `CAL_motorSpMode`, `CAL_motorManualSp_M1..M4`, `CAL_motorSpMax` and `CAL_motorManual` as read back from the board, so a rig run holds the request next to the measured rpm |
-| **Attitude** | 3D quadrocopter model (OpenGL) driven by the firmware's body-to-NED quaternion `AttQuat0..3`: ground grid, N/E/D triad, mouse orbit/zoom, a roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`. *Align yaw* takes the board's current heading as "toward the screen" so the model on screen turns like the board on the desk — a view-only rotation, the readout, XCP and MF4 stay untouched. A stale or disconnected pose is drawn desaturated, never as live. Beside it a **Position** panel: top-down N/E trail (2/5/20 m window, age-faded) with velocity arrow and ground speed, altitude bar for `Up = -NavPosDown` with vertical rate, and two anchoring readouts — horizontal from `NavGnssTrusted`/`NavHorizontalOk`/`GnssNavOk` ("GNSS anchored" / "frozen — GNSS untrusted" / "no fix — position held", with a tagged fallback for older A2Ls), vertical from the barometer — plus a LOCK badge from `NavStationaryLocked` that explains a velocity pinned to zero |
+| **Attitude** | 3D quadrocopter model (OpenGL) driven by the firmware's body-to-NED quaternion `AttQuat0..3`: ground grid, N/E/D triad, mouse orbit/zoom, a roll/pitch/yaw readout that always equals the plotted `AttRoll/AttPitch/AttYaw`. *Align yaw* takes the board's current heading as "toward the screen" so the model on screen turns like the board on the desk — a view-only rotation, the readout, XCP and MF4 stay untouched. A stale or disconnected pose is drawn desaturated, never as live. Under both sits the **flight-controller panel**: roll/pitch/yaw setpoints (Enter or Apply, *Level* = 0/0/hold, "hold current heading" writes -1), a Shadow/Drive switch (`CAL_ctrlMode`, Drive asks for confirmation), collective thrust (`CAL_ctrlThrustN`), setpoint vs actual per axis as numbers and as 10 s plots, controller request vs measured rpm per motor, `CtrlStatus` decoded and `CtrlTrips`. Entry is enabled only while ARMED; every value shown as "in force" is the firmware's read-back, and a drop back to shadow (trip or disarm) is reported with its reason. All `Ctrl*` signals and `CAL_ctrl*` words go into the MF4 log Beside it a **Position** panel: top-down N/E trail (2/5/20 m window, age-faded) with velocity arrow and ground speed, altitude bar for `Up = -NavPosDown` with vertical rate, and two anchoring readouts — horizontal from `NavGnssTrusted`/`NavHorizontalOk`/`GnssNavOk` ("GNSS anchored" / "frozen — GNSS untrusted" / "no fix — position held", with a tagged fallback for older A2Ls), vertical from the barometer — plus a LOCK badge from `NavStationaryLocked` that explains a velocity pinned to zero |
 | **Motors** | ARM (with confirmation), DISARM (kill button, no confirmation), STOP ALL, a manual-throttle switch and one slider per motor (0 = stop, then 48..2047 — DShot commands 1..47 are never written), optional "link all four". Per motor: the DShot value actually on the wire with the commanded value as a marker, the bidirectional-DShot rpm, and the two telemetry sources side by side (bidir DShot: eRPM, ok count · KISS: rpm, temperature, received/missed) with a telemetry-alive lamp. Sliders are live only while connected, ARMED and the firmware has read back `CAL_motorManual` = 1 (checked once per second); a stale link shows STALE, never OFF. A unit switch ("Throttle (DShot)" / "Speed (rpm)", `CAL_motorSpMode`) sets what the sliders mean: in speed mode they are mechanical rpm (range up to the largest rpm the firmware's table maps within the ceiling, with the commanded DShot value shown under each slider); the unit shown is always the firmware's read-back, the sliders stop on every switch, and an A2L without `CAL_motorSpMode` stays throttle-only. Under each slider an entry field with a **Set** button takes the exact value (rpm or DShot, applied by Set or Enter, never overwritten by the slider or a read-back). Everything is resolved by name from the A2L (`EscMotorState`, `EscM<n>*`, `CAL_motor*`) |
 
 The MF4 recording is deliberately standard-conforming, so measurement files can
@@ -65,6 +65,7 @@ lands.
 | DShot throttle ceiling (`CAL_motorSpMax`, `Xcp_Cal` 0x50, fw PR #28) | commit `2027c6e` (Motors tab ceiling field, `motorview.*`; older GUI still works but cannot raise the ceiling above 1600 without the Calibration tab) | 2026-10-19 |
 | Manual setpoint unit (`CAL_motorSpMode`, `Xcp_Cal` 0x52, fw 1.19.29): throttle or rpm sliders | branch `feat/motor-speed-mode` (Motors tab unit switch, entry field with Set, setpoint words in the MF4; `motorview.*`/`motormath.h`/`xcppanel.*`; older GUI still works, but against fw 1.19.29 (default SPEED) its slider values are read as rpm, i.e. far less thrust than shown) | 2026-10-31 |
 | Notch tuning words (`NotchQ`, `NotchEnable`, `Xcp_FusionCal` 100 B, branch `feature/rpm_notch`) logged to MF4 | branch `feat/log-notch-cal` (see `git log`) | 2026-11-09 |
+| Flight controller on the motor path (`CAL_ctrlMode`/`CAL_ctrlThrustN`/`CAL_ctrlTiltMaxDeg`/`CAL_ctrlRpmMin`/`CAL_ctrlOmKp/TauKp/TauKi_0..2`/`CAL_ctrlAttSp_0..2`, `Xcp_Cal` now 148 B; `Ctrl*` in `Xcp_Esc`, fw 1.19.32, branch `feature/controller-wiring`) | branch `feat/attitude-ctrl` (controller panel under the Attitude tab, `ctrlview.*`/`ctrlmath.h`; needs the chunked Calibration read of `feat/log-notch-cal`; an A2L without them shows "not in this A2L" and stays inert) | 2026-11-10 |
 
 
 ![Motors tab: ARMED banner, manual-throttle switch, four motor columns with throttle slider, DShot value and rpm, bidirectional-DShot and KISS telemetry blocks underneath](docs/img/motor-tab.png)
@@ -130,7 +131,9 @@ and exercised by headless CTest targets (`EXCLUDE_FROM_ALL`, built on purpose):
 table), `diag_selfcheck` (A2L-derived diagnostic word grouping),
 `motor_selfcheck` (slider ↔ DShot mapping — never 1..47 on the wire),
 `motor_view_selfcheck` (the Motors tab on the offscreen platform with a
-synthetic A2L and synthetic read-backs) and `xcp_queue_selfcheck` (the one
+synthetic A2L and synthetic read-backs), `ctrl_selfcheck` (controller read-back
+windows, status decode, write gates, yaw unwrap), `ctrl_view_selfcheck` (the
+controller panel, offscreen, synthetic) and `xcp_queue_selfcheck` (the one
 read-back window and reply parser behind the Motors-tab writes).
 
 ```bat
@@ -166,6 +169,11 @@ motormath.h         pure slider<->DShot mapping / bar scaling, shared by
                     motorview.cpp and motor_selfcheck
 motorproto.h        pure helpers behind the Motors-tab XCP writes: which A2L
                     words are motor words, the read-back window, reply parsing
+ctrlview.*          flight-controller panel under the Attitude tab: setpoints,
+                    Shadow/Drive, thrust, setpoint-vs-actual plots (XCP I/O
+                    goes through XcpPanel)
+ctrlmath.h          pure helpers: CAL_ctrl* read-back windows/parser, calibration
+                    read chunks, CtrlStatus decode, write gates, yaw unwrap
 diagmath.*          pure Diagnostics-tab word-grouping logic (one section
                     per A2L diagnostic word), shared by xcppanel.cpp and
                     diag_selfcheck
