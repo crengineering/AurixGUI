@@ -37,12 +37,14 @@ void wait(int ms)
 
 // Synthetic measurement block at 0x1000.
 constexpr quint32 kBase = 0x1000;
-constexpr int kOffState = 0x00, kOffStatus = 0x04, kOffTrips = 0x08, kOffRoll = 0x0C, kOffSp0 = 0x10;
+constexpr int kOffState = 0x00, kOffStatus = 0x04, kOffTrips = 0x08, kOffRoll = 0x0C, kOffSp0 = 0x10,
+          kOffMode = 0x14, kOffReason = 0x18;
 
 struct Rig {
     CtrlView view;
     QVector<QPair<QString, double>> writes;
     int readBacks = 0;
+    quint32 curMode = 0;     // what the board's CtrlMode measurement shows (follows readBack())
     QString lastLog;
 
     Rig()
@@ -56,6 +58,8 @@ struct Rig {
         m("CtrlTrips", kOffTrips, A2lType::Uint32);
         m("AttRoll", kOffRoll, A2lType::Float32);
         m("CtrlAttSp_0", kOffSp0, A2lType::Float32);
+        m("CtrlMode", kOffMode, A2lType::Uint32);
+        m("CtrlTripReason", kOffReason, A2lType::Uint32);
         view.setAvailable(meas);
 
         QVector<A2lChar> chars;
@@ -77,7 +81,8 @@ struct Rig {
         QObject::connect(&view, &CtrlView::logMessage, &view, [this](const QString &t) { lastLog = t; });
     }
 
-    void sample(int state, quint32 status = 0, quint32 trips = 0, float roll = 0.0f, float sp0 = 0.0f)
+    void sample(int state, quint32 status = 0, quint32 trips = 0, float roll = 0.0f, float sp0 = 0.0f,
+                quint32 reason = 0)
     {
         QByteArray b(0x20, '\0');
         b[kOffState] = char(state);
@@ -85,6 +90,8 @@ struct Rig {
         qToLittleEndian<quint32>(trips, b.data() + kOffTrips);
         std::memcpy(b.data() + kOffRoll, &roll, 4);
         std::memcpy(b.data() + kOffSp0, &sp0, 4);
+        qToLittleEndian<quint32>(curMode, b.data() + kOffMode);
+        qToLittleEndian<quint32>(reason, b.data() + kOffReason);
         XcpClient::Measurements mm;
         mm.blockBase = { kBase };
         mm.blockRaw = { b };
@@ -93,6 +100,7 @@ struct Rig {
     void readBack(double mode, double r = 0, double p = 0, double y = -1, double thrust = 0,
                   double tilt = 30, bool fresh = true)
     {
+        curMode = mode != 0.0 ? 1u : 0u;
         QMap<QString, double> v;
         v["CAL_ctrlMode"] = mode;
         v["CAL_ctrlThrustN"] = thrust;
@@ -288,7 +296,7 @@ int main(int argc, char **argv)
         r.readBack(1);
         r.sample(2, 1, 0);
         r.sample(2, 1 | 2, 0);          // nav estimate invalid
-        r.sample(2, 0, 1);              // trip counted, bits gone again
+        r.sample(2, 0, 1, 0.0f, 0.0f, 2);   // trip counted, bits gone again; firmware latched reason 2
         check("trip: banner names the trip and the fault bit seen",
               r.bannerVisibleWith("dropped the controller to SHADOW") && r.bannerVisibleWith("navigation estimate invalid"));
         check("trip: counter shown", r.hasText("Trips since boot: 1"));
@@ -306,6 +314,44 @@ int main(int argc, char **argv)
               r.readBacks > 0 && !r.button("Apply")->isEnabled());
         r.readBack(0);
         check("drop on disarm explained", r.bannerVisibleWith("left ARMED"));
+    }
+
+    // 8b. fw 1.19.33: CtrlMode at DAQ rate, CtrlTripReason, thrust only while ARMED
+    {
+        Rig r;
+        r.armed();
+        answerDialog(true);
+        r.button("Drive")->click();
+        r.readBack(1);
+        r.curMode = 0;                  // the board drops the mode; no cal read-back yet
+        r.sample(2, 8, 1, 0.0f, 0.0f, 8);
+        check("DAQ CtrlMode 0: mode label SHADOW at sample rate, reason from CtrlTripReason",
+              r.hasText("CAL_ctrlMode): SHADOW") && r.bannerVisibleWith("flight core silent"));
+        check("status bit 8 decoded", r.hasText("flight core silent"));
+    }
+    {
+        Rig r;
+        r.view.setConnected(true);
+        r.sample(0);
+        r.readBack(0);
+        check("DISARMED: thrust entry disabled with the reason",
+              !r.button("Set")->isEnabled() && r.hasText("keeps thrust only while ARMED"));
+        r.button("Set")->click();
+        check("DISARMED: Set thrust writes nothing", r.writes.isEmpty());
+    }
+    {
+        Rig r;
+        r.armed();
+        check("ARMED: thrust entry enabled", r.button("Set")->isEnabled());
+        r.button("Set")->click();       // 0 N is the normal start
+        check("thrust 0 written", r.writes.size() == 1 && r.writes[0] == qMakePair(QString("CAL_ctrlThrustN"), 0.0));
+        r.readBack(0, 0, 0, -1, 0);
+        check("thrust confirmed by read-back", !r.hasText("pending...") && r.hasText("in force: 0.00 N"));
+        r.readBack(0, 0, 0, -1, 4.0);   // raised by someone else / earlier
+        r.sample(0);
+        r.readBack(0, 0, 0, -1, 0);     // disarm reset it
+        check("thrust reset by the firmware is reported, not an error",
+              r.bannerVisibleWith("Thrust was reset from 4.00 N to 0"));
     }
 
     // 9. stale link: entry disabled, numbers greyed, Shadow still there
@@ -328,8 +374,8 @@ int main(int argc, char **argv)
         r.button("Drive")->click();
         wait(1700);
         r.sample(2);
-        check("unconfirmed Drive: mode unknown + notice",
-              r.hasText("CAL_ctrlMode): --") && r.bannerVisibleWith("not confirmed"));
+        check("unconfirmed Drive: notice, mode shown is the DAQ CtrlMode truth (shadow)",
+              r.hasText("CAL_ctrlMode): SHADOW") && r.bannerVisibleWith("not confirmed"));
     }
 
     // 11. an A2L without the controller: inert, says why

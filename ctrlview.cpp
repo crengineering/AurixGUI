@@ -92,7 +92,9 @@ CtrlView::CtrlView(QWidget *parent)
     connect(&m_modeTimer, &QTimer::timeout, this, [this]() {
         if (m_modeReq < 0)
             return;
-        setNotice(tr("CAL_ctrlMode = %1 was not confirmed by read-back within 1.5 s - the controller mode in force is unknown.").arg(m_modeReq));
+        setNotice(m_idxMode >= 0
+                      ? tr("CAL_ctrlMode = %1 was not confirmed by read-back within 1.5 s - the mode shown is the CtrlMode measurement.").arg(m_modeReq)
+                      : tr("CAL_ctrlMode = %1 was not confirmed by read-back within 1.5 s - the controller mode in force is unknown.").arg(m_modeReq));
         m_modeReq = -1;
         m_cal.remove(QStringLiteral("CAL_ctrlMode"));
         m_prevMode = -1;
@@ -268,6 +270,10 @@ void CtrlView::buildUi()
     thrRow->addWidget(m_thrSpin, 0, 0);
     thrRow->addWidget(m_thrBtn, 0, 1);
     thrRow->addWidget(m_thrInForce, 1, 0, 1, 2);
+    m_thrReasonLbl = new QLabel;
+    m_thrReasonLbl->setWordWrap(true);
+    m_thrReasonLbl->setStyleSheet(css(kColAmber, true));
+    thrRow->addWidget(m_thrReasonLbl, 2, 0, 1, 2);
 
     auto *col1 = new QVBoxLayout;
     col1->addWidget(m_stateLbl);
@@ -382,6 +388,8 @@ void CtrlView::setAvailable(const QVector<A2lMeas> &meas)
     m_idxState  = indexOfMeas(meas, "EscMotorState");
     m_idxStatus = indexOfMeas(meas, "CtrlStatus");
     m_idxTrips  = indexOfMeas(meas, "CtrlTrips");
+    m_idxMode   = indexOfMeas(meas, "CtrlMode");            // fw >= 1.19.33: CAL_ctrlMode in force, at DAQ rate
+    m_idxTripReason = indexOfMeas(meas, "CtrlTripReason");  // fw >= 1.19.33
     const char *att[3] = { "AttRoll", "AttPitch", "AttYaw" };
     for (int i = 0; i < 3; ++i) {
         m_idxAtt[i]  = indexOfMeas(meas, att[i]);
@@ -557,14 +565,22 @@ void CtrlView::feedSample(const XcpClient::Measurements &m)
     const bool haveTr = dec(m_idxTrips, &tr_);
     if (haveSt) {
         const quint32 s = quint32(st);
-        m_faultSeen |= s & (kCtrlStNavInvalid | kCtrlStTilt);
+        m_faultSeen |= s & (kCtrlStNavInvalid | kCtrlStTilt | kCtrlStCoreSilent);
         m_statusLbl->setText(tr("Status: %1").arg(ctrlStatusText(s)));
-        m_statusLbl->setStyleSheet((s & (kCtrlStNavInvalid | kCtrlStTilt)) ? css(kColRed, true)
+        m_statusLbl->setStyleSheet((s & (kCtrlStNavInvalid | kCtrlStTilt | kCtrlStCoreSilent)) ? css(kColRed, true)
                                    : (s & kCtrlStDriving) ? css(kColAmber, true) : QString());
     } else {
         m_statusLbl->setText(tr("Status: --"));
         m_statusLbl->setStyleSheet(css(kColGrey));
     }
+    // Mode in force at DAQ rate (CtrlMode, fw >= 1.19.33). While our own write is
+    // unconfirmed the cal read-back decides, so a sample older than the write
+    // cannot undo it.
+    double mv = 0.0, rv = 0.0;
+    if (dec(m_idxMode, &mv) && m_modeReq < 0)
+        noteModeChange(mv != 0.0 ? 1 : 0);
+    if (dec(m_idxTripReason, &rv))
+        m_tripReason = quint32(rv);
     if (haveTr) {
         noteTrip(haveSt ? quint32(st) : 0u, quint32(tr_));
         m_tripsLbl->setText(tr("Trips since boot: %1").arg(quint32(tr_)));
@@ -619,6 +635,7 @@ void CtrlView::feedSample(const XcpClient::Measurements &m)
         put(m_mot[i].diff, rpm - req, 0, haveReq && haveRpm);
     }
 
+    updateInForce();   // the mode label follows CtrlMode at sample rate
     updateControls();
 }
 
@@ -634,7 +651,7 @@ void CtrlView::noteTrip(quint32 status, quint32 trips)
         return;
     }
     if (trips > m_trips) {
-        const QString reason = ctrlTripReason(m_faultSeen);
+        const QString reason = ctrlTripReason(m_idxTripReason >= 0 ? m_tripReason : m_faultSeen);
         setNotice(tr("The firmware dropped the controller to SHADOW (trip %1, %2 since the last one): %3. "
                      "Motors get nothing from it; mode and setpoints were reset.")
                       .arg(trips).arg(trips - m_trips).arg(reason));
@@ -667,8 +684,18 @@ void CtrlView::onCharsRead(const QMap<QString, double> &values, bool fresh)
 {
     if (values.isEmpty())
         return;
+    const double thrBefore = m_cal.value(QStringLiteral("CAL_ctrlThrustN"), qQNaN());
     for (auto it = values.constBegin(); it != values.constEnd(); ++it)
         m_cal.insert(it.key(), it.value());
+    {
+        // The firmware resets thrust (and the setpoints) to 0 whenever it leaves ARMED or
+        // drops the mode. Not an error, but never silent.
+        const QString kT = QStringLiteral("CAL_ctrlThrustN");
+        if (values.contains(kT) && std::isnan(m_thrReq) && std::isfinite(thrBefore) && thrBefore > 0.0
+            && values.value(kT) == 0.0 && m_notice.isEmpty())
+            setNotice(tr("Thrust was reset from %1 N to 0 by the firmware (it is only kept while ARMED and is cleared on every "
+                         "drop of the controller mode).").arg(thrBefore, 0, 'f', 2));
+    }
     m_calAge.restart();
     m_haveCal = true;
 
@@ -691,14 +718,7 @@ void CtrlView::onCharsRead(const QMap<QString, double> &values, bool fresh)
                 m_prevMode = newMode;
             }
         } else {
-            if (m_prevMode == 1 && newMode == 0 && !(m_tripClock.isValid() && m_tripClock.elapsed() < 5000)) {
-                setNotice(armed()
-                              ? tr("The controller went back to SHADOW (CAL_ctrlMode reads 0) without a new trip: check "
-                                   "the Motors tab (manual throttle) and CtrlStatus.")
-                              : tr("The controller went back to SHADOW because the vehicle left ARMED (now %1): the firmware "
-                                   "resets mode and setpoints.").arg(motorStateName(m_state)));
-            }
-            m_prevMode = newMode;
+            noteModeChange(newMode);
         }
     }
 
@@ -744,6 +764,30 @@ void CtrlView::onCharsRead(const QMap<QString, double> &values, bool fresh)
     syncEntryFromReadBack();
     updateInForce();
     updateControls();
+}
+
+// Mode in force: CtrlMode from the DAQ when the A2L has it (then it is as live as the
+// samples), else the 2 Hz read-back of CAL_ctrlMode.
+bool CtrlView::modeKnown() const
+{
+    if (m_idxMode >= 0)
+        return m_prevMode >= 0 && !isStale();
+    return m_prevMode >= 0 && m_haveCal && m_calAge.elapsed() <= kCalStaleMs;
+}
+
+// A mode that went 1 -> 0 on its own is reported once: after a trip the trip banner
+// already says why, otherwise the vehicle state does.
+void CtrlView::noteModeChange(int newMode)
+{
+    if (m_prevMode == 1 && newMode == 0 && m_modeReq < 0 && !(m_tripClock.isValid() && m_tripClock.elapsed() < 5000)) {
+        setNotice(armed()
+                      ? tr("The controller went back to SHADOW without a new trip: check the Motors tab (manual throttle) "
+                           "and CtrlStatus.")
+                      : tr("The controller went back to SHADOW because the vehicle left ARMED (now %1): the firmware "
+                           "resets mode, setpoints and thrust.").arg(motorStateName(m_state)));
+        m_entryDirty = false;
+    }
+    m_prevMode = newMode;
 }
 
 // The entry fields follow the firmware (e.g. back to 0 / 0 / hold after a
@@ -814,12 +858,31 @@ QString CtrlView::driveDisabledReason() const
             .arg(motorStateName(m_state));
     if (m_manual == 1)
         return tr("Manual throttle is ON in the Motors tab; it wins over the controller.");
-    if (!m_haveCal || m_calAge.elapsed() > kCalStaleMs || m_prevMode < 0)
+    if (!modeKnown() || !m_haveCal)
         return tr("Waiting for the firmware read-back of CAL_ctrlMode...");
     if (m_modeReq >= 0)
         return tr("Waiting for CAL_ctrlMode = %1 to be confirmed by read-back...").arg(m_modeReq);
     if (m_prevMode == 1)
         return QString();   // already driving: button is just the checked state
+    return QString();
+}
+
+// Thrust follows the setpoint rule: only kept by the firmware while ARMED.
+QString CtrlView::thrustDisabledReason() const
+{
+    if (!m_thrOk)
+        return tr("CAL_ctrlThrustN is not in the loaded A2L.");
+    if (!m_connected)
+        return tr("Not connected.");
+    if (isStale())
+        return tr("No live data (stale).");
+    if (!armed())
+        return tr("Vehicle is %1: the firmware keeps thrust only while ARMED and resets it to 0 otherwise.")
+            .arg(motorStateName(m_state));
+    if (!m_haveCal || m_calAge.elapsed() > kCalStaleMs)
+        return tr("Waiting for the firmware read-back of CAL_ctrl*...");
+    if (!std::isnan(m_thrReq))
+        return tr("Waiting for the read-back of the thrust...");
     return QString();
 }
 
@@ -836,7 +899,7 @@ void CtrlView::updateControls()
     m_reasonLbl->setText(spReason);
     m_reasonLbl->setVisible(!spReason.isEmpty());
 
-    const bool knownMode = m_modeOk && m_prevMode >= 0 && m_haveCal && m_calAge.elapsed() <= kCalStaleMs && m_modeReq < 0;
+    const bool knownMode = m_modeOk && modeKnown() && m_modeReq < 0;
     m_shadowBtn->setChecked(knownMode && m_prevMode == 0);
     m_driveBtn->setChecked(knownMode && m_prevMode == 1);
     // Shadow is the way out: available whenever there is a link, whatever else is unknown.
@@ -847,9 +910,12 @@ void CtrlView::updateControls()
     m_driveReasonLbl->setText(driveReason);
     m_driveReasonLbl->setVisible(showReason);
 
-    const bool thr = m_thrOk && m_connected && !isStale() && std::isnan(m_thrReq);
+    const QString thrReason = thrustDisabledReason();
+    const bool thr = thrReason.isEmpty();
     m_thrSpin->setEnabled(thr);
     m_thrBtn->setEnabled(thr);
+    m_thrReasonLbl->setText(thrReason);
+    m_thrReasonLbl->setVisible(!thrReason.isEmpty());
 }
 
 void CtrlView::updateInForce()
@@ -889,7 +955,7 @@ void CtrlView::updateInForce()
     } else if (!m_modeOk) {
         m_modeLbl->setText(tr("Mode (CAL_ctrlMode): n/a"));
         m_modeLbl->setStyleSheet(css(kColGrey));
-    } else if (!calOk || m_prevMode < 0) {
+    } else if (!modeKnown()) {
         m_modeLbl->setText(tr("Mode (CAL_ctrlMode): --"));
         m_modeLbl->setStyleSheet(css(kColGrey));
     } else {
@@ -987,8 +1053,10 @@ void CtrlView::onLevel()
 
 void CtrlView::onSetThrust()
 {
-    if (!m_thrOk || !m_connected || isStale() || !std::isnan(m_thrReq))
+    if (!thrustDisabledReason().isEmpty()) {
+        updateControls();
         return;
+    }
     const double v = m_thrSpin->value();
     if (!ctrlThrustWritable(v, m_thrHi)) {
         setNotice(tr("Thrust %1 N is outside 0..%2 N - nothing sent.").arg(v, 0, 'f', 2).arg(m_thrHi, 0, 'f', 1));
@@ -1033,7 +1101,7 @@ void CtrlView::onDriveClicked()
     const auto answer = QMessageBox::question(
         this, tr("Drive the motors from the flight controller?"),
         tr("This sets CAL_ctrlMode = 1: the flight controller drives the motors from now on.\n\n"
-           "Collective thrust %1 N, tilt limit +-%2 deg, rpm minimum %3 rpm per motor.\n\n"
+           "Collective thrust %1 N (0 is the normal start: the motors go to the rpm minimum, then raise the thrust), tilt limit +-%2 deg, rpm minimum %3 rpm per motor.\n\n"
            "Shadow (or DISARM) takes it away again; the firmware also drops it on a trip.\n\nDrive?")
             .arg(num(thrust, 2), num(tilt, 1), num(rmin, 0)),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);

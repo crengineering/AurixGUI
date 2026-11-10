@@ -145,6 +145,7 @@ constexpr int kCtrlArmedState = 2;          // EscMotorState: 0 disarmed, 1 init
 constexpr quint32 kCtrlStDriving = 1u;
 constexpr quint32 kCtrlStNavInvalid = 2u;
 constexpr quint32 kCtrlStTilt = 4u;
+constexpr quint32 kCtrlStCoreSilent = 8u;   // no controller output for 5 ms (fw >= 1.19.33)
 
 inline QString ctrlStatusText(quint32 s)
 {
@@ -152,21 +153,23 @@ inline QString ctrlStatusText(quint32 s)
     if (s & kCtrlStDriving)    parts << QStringLiteral("driving");
     if (s & kCtrlStNavInvalid) parts << QStringLiteral("navigation estimate invalid");
     if (s & kCtrlStTilt)       parts << QStringLiteral("tilt limit exceeded");
-    const quint32 other = s & ~(kCtrlStDriving | kCtrlStNavInvalid | kCtrlStTilt);
+    if (s & kCtrlStCoreSilent) parts << QStringLiteral("flight core silent");
+    const quint32 other = s & ~(kCtrlStDriving | kCtrlStNavInvalid | kCtrlStTilt | kCtrlStCoreSilent);
     if (other)
         parts << QStringLiteral("unknown bits 0x%1").arg(other, 0, 16);
     return parts.isEmpty() ? QStringLiteral("idle (shadow)") : parts.join(QStringLiteral(", "));
 }
 
-// Why the firmware dropped the controller, from the fault bits seen last. 0 =
-// neither bit was ever seen: the A2L's third cause (flight core silent / request
-// unusable) cannot be told from here.
+// Why the firmware dropped the controller: CtrlTripReason (latched by the
+// firmware at the last forced drop, fw >= 1.19.33; same bit values as the fault
+// bits of CtrlStatus). 0 = no reason published (older firmware, or none since boot).
 inline QString ctrlTripReason(quint32 faultBits)
 {
     QStringList parts;
     if (faultBits & kCtrlStNavInvalid) parts << QStringLiteral("navigation estimate invalid");
     if (faultBits & kCtrlStTilt)       parts << QStringLiteral("tilt limit exceeded");
-    return parts.isEmpty() ? QStringLiteral("request unusable (flight core silent) or no fault bit caught between two samples")
+    if (faultBits & kCtrlStCoreSilent) parts << QStringLiteral("flight core silent (no controller output for 5 ms)");
+    return parts.isEmpty() ? QStringLiteral("no reason published by the firmware")
                            : parts.join(QStringLiteral(" + "));
 }
 
@@ -286,9 +289,11 @@ inline bool ctrlSelfCheck(QString *report)
     check("status 1 -> driving", ctrlStatusText(1) == "driving");
     check("status 3 -> driving + nav invalid", ctrlStatusText(3) == "driving, navigation estimate invalid");
     check("status 4 -> tilt", ctrlStatusText(4) == "tilt limit exceeded");
-    check("status 8 -> unknown bit shown", ctrlStatusText(8).contains("0x8"));
+    check("status 16 -> unknown bit shown", ctrlStatusText(16).contains("0x10"));
     check("trip reason: nav + tilt", ctrlTripReason(6) == "navigation estimate invalid + tilt limit exceeded");
-    check("trip reason: none seen says so", ctrlTripReason(0).contains("unusable"));
+    check("trip reason: core silent", ctrlTripReason(8).contains("flight core silent"));
+    check("trip reason: 0 says none published", ctrlTripReason(0).contains("no reason"));
+    check("status 8 -> flight core silent", ctrlStatusText(8) == "flight core silent");
 
     check("yaw: 0 / 359.9 / 360 are headings", ctrlYawIsHeading(0) && ctrlYawIsHeading(359.9) && ctrlYawIsHeading(360));
     check("yaw: -1 / 361 / NaN are not", !ctrlYawIsHeading(-1) && !ctrlYawIsHeading(361) && !ctrlYawIsHeading(qQNaN()));

@@ -80,6 +80,9 @@ private:
     bool armed() const { return m_state == 2; }
     QString entryDisabledReason() const;
     QString driveDisabledReason() const;
+    QString thrustDisabledReason() const;
+    bool modeKnown() const;
+    void noteModeChange(int newMode);
 
     void onApply();
     void onLevel();
@@ -94,7 +97,7 @@ private:
     // ---- A2L binding ------------------------------------------------------
     QVector<A2lMeas> m_meas;
     QVector<A2lChar> m_chars;
-    int m_idxState = -1, m_idxStatus = -1, m_idxTrips = -1;
+    int m_idxState = -1, m_idxStatus = -1, m_idxTrips = -1, m_idxMode = -1, m_idxTripReason = -1;
     int m_idxAtt[3] = { -1, -1, -1 }, m_idxSp[3] = { -1, -1, -1 };
     int m_idxOm[3] = { -1, -1, -1 }, m_idxTau[3] = { -1, -1, -1 }, m_idxTauI[3] = { -1, -1, -1 };
     int m_idxCtrlRpm[4] = { -1, -1, -1, -1 }, m_idxRpm[4] = { -1, -1, -1, -1 }, m_idxRpmOk[4] = { -1, -1, -1, -1 };
@@ -123,7 +126,8 @@ private:
     int  m_state = -1;
     quint32 m_trips = 0;
     bool m_haveTrips = false;
-    quint32 m_faultSeen = 0;     // fault bits (2|4) seen since the last trip report
+    quint32 m_faultSeen = 0;     // fault bits seen since the last trip report (fallback when CtrlTripReason is not in the A2L)
+    quint32 m_tripReason = 0;    // CtrlTripReason, latched by the firmware
     int  m_prevState = -1;
     int  m_prevMode = -1;        // last read-back mode, for "dropped by the firmware"
     QElapsedTimer m_sinceSample;
@@ -136,7 +140,7 @@ private:
     // ---- widgets -----------------------------------------------------------
     QLabel *m_banner = nullptr, *m_bindLbl = nullptr, *m_stateLbl = nullptr, *m_modeLbl = nullptr,
            *m_statusLbl = nullptr, *m_tripsLbl = nullptr, *m_reasonLbl = nullptr, *m_driveReasonLbl = nullptr,
-           *m_thrInForce = nullptr, *m_limitLbl = nullptr;
+           *m_thrInForce = nullptr, *m_thrReasonLbl = nullptr, *m_limitLbl = nullptr;
     QPushButton *m_shadowBtn = nullptr, *m_driveBtn = nullptr, *m_applyBtn = nullptr,
                 *m_levelBtn = nullptr, *m_thrBtn = nullptr;
     QDoubleSpinBox *m_spin[3] = { nullptr, nullptr, nullptr };
