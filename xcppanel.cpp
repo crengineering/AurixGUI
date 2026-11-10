@@ -3,6 +3,7 @@
 #include "plotpane.h"
 #include "attitudeview.h"
 #include "motorview.h"
+#include "ctrlview.h"
 #include "motormath.h"
 #include "motorproto.h"
 #include "positionview.h"
@@ -253,6 +254,11 @@ XcpPanel::XcpPanel(QWidget *parent)
         const MotorReadPlan plan = motorReadPlan(m_chars);
         if (plan.ok && address == plan.lo)
             m_motorReadTags.dropOldest();
+        for (const CtrlWindow &w : ctrlReadWindows(m_chars))
+            if (w.lo == address) {
+                m_ctrlReadTags.dropOldest();
+                break;
+            }
     });
     connect(m_client, &XcpClient::daqStarted,           this, &XcpPanel::onDaqStarted);
     connect(m_client, &XcpClient::daqFailed,            this, &XcpPanel::onDaqFailed);
@@ -838,6 +844,10 @@ void XcpPanel::loadA2l(const QString &path, bool remember)
         m_motorView->setCharsAvailable(m_chars);
         updateMotorReadBackState();
     }
+    if (m_ctrlView) {
+        m_ctrlView->setAvailable(m_meas);
+        m_ctrlView->setCharsAvailable(m_chars);
+    }
     emit a2lLoaded(m_meas);   // -> SystemFooter (Actuators lamps)
     emit a2lCharsLoaded(m_chars);   // -> SystemFooter (ARM/DISARM)
 }
@@ -1283,9 +1293,35 @@ QWidget *XcpPanel::buildAttitudeTab()
     splitter->setStretchFactor(0, 1);
     splitter->setStretchFactor(1, 1);
 
+    // Flight-controller operation (setpoints, Shadow / Drive, thrust, setpoint vs
+    // actual) in the lower part of the same tab; the splitter handle lets the
+    // 3D view / position panel give way. The panel does no XCP I/O itself.
+    m_ctrlView = new CtrlView;
+    m_ctrlView->setAvailable(m_meas);
+    m_ctrlView->setCharsAvailable(m_chars);
+    connect(m_ctrlView, &CtrlView::writeCharRequested, this, &XcpPanel::writeCtrlChar);
+    connect(m_ctrlView, &CtrlView::readBackRequested,  this, &XcpPanel::readCtrlBack);
+    connect(m_ctrlView, &CtrlView::logMessage, this, [this](const QString &t) { m_log->appendPlainText(t); });
+    connect(this, &XcpPanel::ctrlCharsRead,   m_ctrlView, &CtrlView::onCharsRead);
+    connect(this, &XcpPanel::motorCharsRead,  m_ctrlView, &CtrlView::onMotorCharsRead);
+    m_ctrlPollTimer = new QTimer(this);
+    m_ctrlPollTimer->setInterval(500);
+    connect(m_ctrlPollTimer, &QTimer::timeout, this, &XcpPanel::readCtrlBack);
+    m_ctrlReadTimer = new QTimer(this);
+    m_ctrlReadTimer->setSingleShot(true);
+    m_ctrlReadTimer->setInterval(60);
+    connect(m_ctrlReadTimer, &QTimer::timeout, this, &XcpPanel::readCtrlBack);
+
+    auto *vsplit = new QSplitter(Qt::Vertical);
+    vsplit->addWidget(splitter);
+    vsplit->addWidget(m_ctrlView);
+    vsplit->setStretchFactor(0, 5);
+    vsplit->setStretchFactor(1, 6);
+    vsplit->setChildrenCollapsible(false);
+
     auto *tab = new QWidget;
     auto *layout = new QVBoxLayout(tab);
-    layout->addWidget(splitter);
+    layout->addWidget(vsplit);
     return tab;
 }
 
@@ -1444,6 +1480,8 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
         m_positionView->feedSample(m);
     if (m_motorView)
         m_motorView->feedSample(m);
+    if (m_ctrlView)
+        m_ctrlView->feedSample(m);
     if (m_disarmPending) {
         for (const A2lMeas &me : m_meas) {
             if (me.name != QLatin1String("EscMotorState"))
@@ -1475,6 +1513,12 @@ void XcpPanel::onMeasurements(const XcpClient::Measurements &m)
         const qint64 nowMs = m_timeBase.elapsed();
         for (int i = 0; i < m_logTunChars.size(); ++i)
             values.append(m_logTunMs[i] >= 0 && nowMs - m_logTunMs[i] <= 1000 ? m_logTunVal[i] : qQNaN());
+        // CAL_ctrl* read-back (2 Hz poll): held between reads, NaN once older than 3 s or never read
+        for (const A2lChar &c : m_logCtrlChars) {
+            const auto ms = m_ctrlLastMs.constFind(c.name);
+            values.append(ms != m_ctrlLastMs.constEnd() && nowMs - ms.value() <= 3000
+                              ? m_ctrlLast.value(c.name, qQNaN()) : qQNaN());
+        }
         m_mf4.append(double(m_timeBase.elapsed() - m_logStartMs) / 1000.0, values);
         updateLogStatus();
     }
@@ -1543,6 +1587,16 @@ void XcpPanel::startLogging()
         m_log->appendPlainText("[Logging not started - cancelled or no channels selected]");
         return;
     }
+    // The controller's own signals always ride along (the picker remembers an
+    // older choice that predates them): every Ctrl* measurement is in the file.
+    int ctrlAdded = 0;
+    for (int i = 0; i < m_signalIdx.size(); ++i)
+        if (m_meas[m_signalIdx[i]].name.startsWith(QLatin1String("Ctrl")) && !sel.contains(i)) {
+            sel.append(i);
+            ++ctrlAdded;
+        }
+    if (ctrlAdded > 0)
+        m_log->appendPlainText(QString("[Logging: %1 Ctrl* flight-controller signals added to the selection]").arg(ctrlAdded));
     m_logSel = sel;
     autosaveConfig();
 
@@ -1598,6 +1652,15 @@ void XcpPanel::startLogging()
         m_logTunTimer->start();
         pollTuningWords();
     }
+    // Flight-controller words (mode, thrust, setpoints, gains, tilt limit, rpm min):
+    // every CAL_ctrl* characteristic of the A2L, as float32 read-back values from
+    // the controller panel's 2 Hz poll (NaN = unknown, never a stale value).
+    m_logCtrlChars.clear();
+    for (const A2lChar &c : m_chars)
+        if (ctrlIsChar(c.name)) {
+            m_logCtrlChars.append(c);
+            cfg.append({c.name, c.unit, true});
+        }
     m_mf4.begin(cfg);
 
     m_logStartMs = m_timeBase.elapsed();
@@ -1751,26 +1814,11 @@ void XcpPanel::readCalibration()
     if (m_chars.isEmpty())
         return;
 
-    // Group characteristics by their 0x100 block and issue one read per block
-    // (each block spans <= ~60 bytes, well within a single SHORT_UPLOAD).
-    QSet<quint32> bases;
-    for (const A2lChar &c : m_chars)
-        bases.insert(c.addr & 0xFFFFFF00u);
-
-    for (quint32 base : bases) {
-        quint32 lo = 0xFFFFFFFFu;
-        quint32 hi = 0;
-        for (const A2lChar &c : m_chars) {
-            if ((c.addr & 0xFFFFFF00u) != base)
-                continue;
-            lo = qMin(lo, c.addr);
-            hi = qMax(hi, c.addr + quint32(a2lTypeSize(c.type)));
-        }
-        // SHORT_UPLOAD payload cap is 63 bytes; the FusionCal block is 100 bytes,
-        // so read it in chunks. A char never straddles a chunk (4-aligned, 60 B).
-        for (quint32 a = lo; a < hi; a += 60u)
-            m_client->readMemory(a, quint8(qMin(60u, hi - a)));
-    }
+    // One read per chunk of every 0x100 block (see calReadChunks): the SHORT_UPLOAD
+    // payload cap is 63 bytes and the Xcp_Cal block is 148 bytes (FusionCal 100).
+    // A char never straddles a chunk (4-aligned, 60 B).
+    for (const CtrlWindow &w : calReadChunks(m_chars, 60))
+        m_client->readMemory(w.lo, quint8(w.len));
 }
 
 // ---- NVM command handshake -------------------------------------------
@@ -1887,6 +1935,8 @@ void XcpPanel::onMemoryRead(quint32 address, const QByteArray &data)
         m_logTunSentMs = -1;
         return;
     }
+    if (handleCtrlRead(address, data))
+        return;
     if (handleMotorRead(address, data))
         return;
 
@@ -2018,6 +2068,98 @@ void XcpPanel::writeMotorChar(const QString &name, quint32 value)
     writeCharByName(name, value,
                     name.startsWith(QLatin1String("CAL_motorManualSp_"))
                         ? XcpClient::WriteMode::Coalesce : XcpClient::WriteMode::Normal);
+}
+
+// "Attitude" tab entry point: a CAL_ctrl* write requested by CtrlView. Resolved
+// by name against the A2L, encoded by the A2L type (float32 setpoints / thrust,
+// uint32 mode). Shadow (CAL_ctrlMode = 0) is the way out, so it first drops every
+// queued CAL_ctrl* write and then goes to the head of the queue.
+void XcpPanel::writeCtrlChar(const QString &name, double value)
+{
+    if (!ctrlIsChar(name)) {
+        m_log->appendPlainText(QString("[Ctrl: refused write to %1]").arg(name));
+        return;
+    }
+    if (!m_client->isConnected()) {
+        m_log->appendPlainText(QString("[Ctrl: not connected - write of %1 skipped]").arg(name));
+        return;
+    }
+    if (!std::isfinite(value)) {
+        m_log->appendPlainText(QString("[Ctrl: refused %1 = non-finite value]").arg(name));
+        return;
+    }
+    for (const A2lChar &c : m_chars) {
+        if (c.name != name)
+            continue;
+        bool ok = false;
+        const QString text = (c.type == A2lType::Float32) ? QString::number(value, 'g', 9)
+                                                          : QString::number(qint64(std::llround(value)));
+        const QByteArray bytes = encodeCharValue(c, text, &ok);
+        if (!ok) {
+            m_log->appendPlainText(QString("[Invalid value for %1 - aborted]").arg(name));
+            return;
+        }
+        const bool shadow = name == QLatin1String("CAL_ctrlMode") && value == 0.0;
+        if (shadow) {
+            QSet<quint32> addrs;
+            for (const A2lChar &x : m_chars)
+                if (ctrlIsChar(x.name))
+                    addrs.insert(x.addr);
+            m_client->purgeWrites(addrs);
+        }
+        const bool sent = m_client->writeMemory(c.addr, bytes,
+                                                shadow ? XcpClient::WriteMode::Priority : XcpClient::WriteMode::Normal);
+        if (sent)
+            ++m_ctrlWriteSeq;       // reads issued before this are stale w.r.t. it
+        else
+            m_log->appendPlainText(QString("[Ctrl: write of %1 not sent]").arg(name));
+        return;
+    }
+    m_log->appendPlainText(QString("[%1 not in loaded A2L - write aborted]").arg(name));
+}
+
+// Read-back of every CAL_ctrl* word: one SHORT_UPLOAD per window (windows from
+// the A2L addresses, see ctrlReadWindows). Tagged with the write sequence like
+// the Motors read-back, so a reply to a read that predates a write never
+// confirms it.
+void XcpPanel::readCtrlBack()
+{
+    if (!m_client->isConnected() || m_chars.isEmpty())
+        return;
+    const QVector<CtrlWindow> windows = ctrlReadWindows(m_chars);
+    if (windows.isEmpty())
+        return;
+    if (m_ctrlReadTags.pending() && m_ctrlReadClock.isValid() && m_ctrlReadClock.elapsed() > 3000)
+        m_ctrlReadTags.clear();     // replies lost without an error: do not let the tags fill up for good
+    if (m_ctrlReadClock.isValid() && m_ctrlReadClock.elapsed() < 120
+        && m_ctrlLastReadSeq == m_ctrlWriteSeq && m_ctrlReadTags.pending())
+        return;                 // an equivalent read is already on its way
+    if (m_ctrlReadTags.size() + windows.size() > MotorReadTags::kMax)
+        return;                 // too many unanswered; never evict a tag
+    m_ctrlReadClock.restart();
+    m_ctrlLastReadSeq = m_ctrlWriteSeq;
+    for (const CtrlWindow &w : windows) {
+        m_ctrlReadTags.issue(m_ctrlWriteSeq);
+        m_client->readMemory(w.lo, quint8(w.len));
+    }
+}
+
+bool XcpPanel::handleCtrlRead(quint32 address, const QByteArray &data)
+{
+    const QMap<QString, double> values = ctrlParseRead(m_chars, ctrlReadWindows(m_chars), address, data);
+    if (values.isEmpty())
+        return false;
+    quint32 tag = 0;
+    const bool haveTag = m_ctrlReadTags.take(&tag);
+    const bool fresh = haveTag && MotorReadTags::isFresh(tag, m_ctrlWriteSeq);
+    populateCharsFromRead(address, data, /*quiet=*/true);   // keep the Calibration rows current
+    const qint64 now = m_timeBase.elapsed();
+    for (auto it = values.constBegin(); it != values.constEnd(); ++it) {
+        m_ctrlLast.insert(it.key(), it.value());
+        m_ctrlLastMs.insert(it.key(), now);
+    }
+    emit ctrlCharsRead(values, fresh);
+    return true;
 }
 
 void XcpPanel::armMotors()
@@ -2233,6 +2375,13 @@ void XcpPanel::onMemoryWritten(quint32 address)
                 m_motorSpReadTimer->start();
                 return;
             }
+            if (ctrlIsChar(c.name)) {
+                // One read-back after the burst (roll / pitch / yaw go out as three writes).
+                m_log->appendPlainText(QString("[%1 written]").arg(c.name));
+                if (m_ctrlReadTimer)
+                    m_ctrlReadTimer->start();
+                return;
+            }
             m_log->appendPlainText(QString("[%1 written]").arg(c.name));
             if (c.name.startsWith(QLatin1String("CAL_motor")))
                 readMotorBack();    // cmd / manual: cheap, targeted read-back
@@ -2315,9 +2464,20 @@ void XcpPanel::setConnectedState(bool connected)
         m_positionView->setConnected(connected);
     if (m_motorView)
         m_motorView->setConnected(connected);
+    if (m_ctrlView)
+        m_ctrlView->setConnected(connected);
+    if (m_ctrlPollTimer) {
+        if (connected)
+            m_ctrlPollTimer->start();
+        else
+            m_ctrlPollTimer->stop();
+    }
+    m_ctrlLast.clear();
+    m_ctrlLastMs.clear();
     if (!connected) {
         m_disarmPending = false;
         m_motorReadTags.clear();   // nothing in flight survives a disconnect
+        m_ctrlReadTags.clear();
     }
 
     m_connectBtn->setText(connected ? "Disconnect" : "Connect");

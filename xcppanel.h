@@ -6,6 +6,7 @@
 #include <QMap>
 #include <QQueue>
 #include "motorproto.h"
+#include "ctrlmath.h"
 #include <QSet>
 #include <QVector>
 #include "xcpclient.h"
@@ -28,6 +29,7 @@ class PlotPane;
 class QGridLayout;
 class AttitudeView;
 class MotorView;
+class CtrlView;
 class PositionView;
 
 // "Ethernet" tab: connects to the XCP slave on the TC399. Contains
@@ -51,6 +53,9 @@ public slots:
     void readMotorBack();
     // Driven by the Motors tab (CAL_motor* writes only; see .cpp).
     void writeMotorChar(const QString &name, quint32 value);
+    // Driven by the Attitude tab's controller panel (CAL_ctrl* writes only).
+    void writeCtrlChar(const QString &name, double value);
+    void readCtrlBack();
 
 signals:
     void connectionChanged(bool connected);   // drives the tab lamp icon
@@ -59,6 +64,8 @@ signals:
     // fresh = the read was issued after the last CAL_motor* write was enqueued
     void motorCharsRead(const QMap<QString, quint32> &values, bool fresh);  // -> Motors tab (read-back, by name)
     void a2lCharsLoaded(const QVector<A2lChar> &chars);  // -> SystemFooter (ARM/DISARM)
+    // fresh = the read was issued after the last CAL_ctrl* write was enqueued
+    void ctrlCharsRead(const QMap<QString, double> &values, bool fresh);  // -> controller panel (read-back, by name)
 
 private slots:
     void toggleConnection();
@@ -254,6 +261,17 @@ private:
     bool                 m_motorSpanLogged = false;
     QElapsedTimer        m_disarmClock;                  // kill-latency evidence
     bool                 m_disarmPending = false;
+    CtrlView            *m_ctrlView     = nullptr;   // controller panel under the 3D view / position panel
+    QTimer              *m_ctrlPollTimer = nullptr;      // 2 Hz CAL_ctrl* read-back while connected
+    QTimer              *m_ctrlReadTimer = nullptr;      // 60 ms after the last CAL_ctrl* write ack
+    QElapsedTimer        m_ctrlReadClock;
+    MotorReadTags        m_ctrlReadTags;                 // same bookkeeping as the Motors read-back
+    quint32              m_ctrlWriteSeq = 0;             // bumped by every CAL_ctrl* write enqueued
+    quint32              m_ctrlLastReadSeq = 0;
+    QMap<QString, double> m_ctrlLast;                    // newest CAL_ctrl* read-back, for the log
+    QMap<QString, qint64> m_ctrlLastMs;
+    QVector<A2lChar>     m_logCtrlChars;                 // CAL_ctrl* words logged as read-back
+    bool     handleCtrlRead(quint32 address, const QByteArray &data);
     PositionView        *m_positionView = nullptr;   // right half of "Attitude" tab (SYS1-016)
     QWidget             *m_plotGridHost = nullptr;
     QGridLayout         *m_plotGrid     = nullptr;
