@@ -145,7 +145,7 @@ constexpr int kCtrlArmedState = 2;          // EscMotorState: 0 disarmed, 1 init
 constexpr quint32 kCtrlStDriving = 1u;
 constexpr quint32 kCtrlStNavInvalid = 2u;
 constexpr quint32 kCtrlStTilt = 4u;
-constexpr quint32 kCtrlStCoreSilent = 8u;   // no controller output for 5 ms (fw >= 1.19.33)
+constexpr quint32 kCtrlStCoreSilent = 8u;   // no controller output for 50 ms (fw >= 1.19.35; 5 ms before)
 
 inline QString ctrlStatusText(quint32 s)
 {
@@ -168,7 +168,7 @@ inline QString ctrlTripReason(quint32 faultBits)
     QStringList parts;
     if (faultBits & kCtrlStNavInvalid) parts << QStringLiteral("navigation estimate invalid");
     if (faultBits & kCtrlStTilt)       parts << QStringLiteral("tilt limit exceeded");
-    if (faultBits & kCtrlStCoreSilent) parts << QStringLiteral("flight core silent (no controller output for 5 ms)");
+    if (faultBits & kCtrlStCoreSilent) parts << QStringLiteral("flight core silent (no controller output for 50 ms)");
     return parts.isEmpty() ? QStringLiteral("no reason published by the firmware")
                            : parts.join(QStringLiteral(" + "));
 }
